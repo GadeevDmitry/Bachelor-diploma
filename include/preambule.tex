@@ -4,6 +4,9 @@
 \usepackage[T2A]{fontenc}	 % кодировка
 \usepackage[utf8]{inputenc}	 % кодировка исходного текста
 \usepackage[russian]{babel}	 % локализация и переносы
+\usepackage[htt]{hyphenat}
+\usepackage{microtype}
+\emergencystretch=3em
 
 %% Пакеты для работы с математикой
 \usepackage{amsmath,amsfonts,amssymb,amsthm,mathtools}
@@ -45,6 +48,7 @@
 %% Работа с картинками
 \usepackage{caption} % пакет для подписей к рисункам, в частности, для работы caption*
 \captionsetup{justification=centering} % центрирование подписей к картинкам
+\usepackage{svg}
 \usepackage{graphicx}                  % вставки рисунков
 \graphicspath{{images/}{images2/}}     % папки с картинками
 \setlength\fboxsep{3pt}                % отступ рамки \fbox{} от рисунка
@@ -62,7 +66,7 @@
 \setlength{\parindent}{1.25cm}
 
 %% Интервалы
-\linespread{1}
+\linespread{1.5}
 
 %% TikZ
 \usepackage{tikz}
