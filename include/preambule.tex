@@ -83,10 +83,51 @@
 \usepackage{float}   % добавляет возможность работы с командой [H] которая улучшает расположение на странице
 \usepackage{gensymb} % красивые градусы
 \usepackage{listings} % пакет для листингов с кодом
-\lstset{              % настройки для лисингов с кодом
-basicstyle=\small\ttfamily,
-columns=flexible,
-breaklines=true
+
+\lstset{
+    language=C,
+    % рамка вокруг листинга
+    frame=single,
+    % номера строк слева
+    numbers=left,
+    % расстояние между номерами строк и кодом
+    numbersep=8pt,
+    % подпись под листингом
+    captionpos=b,
+    % таб в коде равен 4 пробелам
+    tabsize=4,
+    % делает кавычки в моноширинном шрифте нормальными, полезно
+    upquote=true,
+    % перенос слишком длинных строк
+    breaklines=false,
+    % показывать табы в коде
+    showtabs=false,
+    % показывать пробелы в коде
+    showspaces=false,
+    % показывать пробелы в строковых литералах в коде
+    showstringspaces=false,
+    % настройки стиля, применяемые ко всему коду
+    basicstyle=\fontsize{10}{9.1}\selectfont\ttfamily,
+    % настройки стиля ключевых слов
+    keywordstyle=\color{blue}\bfseries,
+    % настройки стиля строковых литералов
+    stringstyle=\color{red},
+    % настройки стиля номеров строк
+    numberstyle=\tiny\color{gray}
+}
+
+\definecolor{CommentGreen}{RGB}{0,150,0}
+\lstdefinestyle{normal}{
+    % настройки стиля комментариев
+    commentstyle=\color{CommentGreen},
+}
+
+\definecolor{DiffGreen}{RGB}{0,150,0}
+\definecolor{DiffRed}{RGB}{200,0,0}
+\lstdefinestyle{diff}{
+    commentstyle=,
+    moredelim=[is][\color{DiffGreen}]{<+>}{</+>},
+    moredelim=[is][\color{DiffRed}]{<->}{</->}
 }
 
 % Hyperref (для ссылок внутри  pdf)

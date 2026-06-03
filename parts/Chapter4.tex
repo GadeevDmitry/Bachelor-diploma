@@ -5,3 +5,370 @@
 %описание: выбранный язык и библиотеки и мотивы выбора, архитектура,
 %схема функционирования, теоретическая сложность алгоритма, характеристики
 %функционирования (скорость/память).
+
+Данная глава состоит из двух частей. В первой части рассматриваются ключевые аспекты реализации механизма репликации в исходном коде Linux 6.6. Во второй части приводятся результаты экспериментальной оценки производительности на тестовых приложениях.
+
+\subsection{Детали реализации механизма в исходном коде}
+
+\subsubsection{Виртуальный уровень и политики}
+
+Одной из ключевых структур данных подсистемы управления памятью Linux является \texttt{vm\_area\_struct}. Она описывает диапазон пользовательской памяти, содержит информацию о его свойствах и семантике. Практически любая операция управления памятью в ядре начинается с обращения к соответствующему экземпляру \texttt{vm\_area\_struct}.
+
+Одним из важнейших атрибутов данной структуры являются флаги (см листинг~\ref{lst:vm_area_struct}). Они представляют собой битовую маску, в которой каждый бит соответствует определённому свойству области памяти.
+
+\begin{lstlisting}[
+    style=normal,
+    caption={Флаги виртуальной области памяти},
+    label={lst:vm_area_struct}
+]
+/* include/linux/mm_types.h */
+
+struct vm_area_struct {
+    ...
+	union {
+		const vm_flags_t vm_flags;
+		vm_flags_t __private __vm_flags;
+	};
+    ...
+};
+\end{lstlisting}
+
+Для поддержки механизма репликации были добавлены два новых флага, отвечающих за репликацию таблиц трансляций и данных соответственно (см листинг~\ref{lst:vm_replica_flags}). Именно по ним и будет определяться поведение механизма репликации в отношении конкретной области памяти.
+
+\begin{lstlisting}[style=diff]
+ /* include/linux/mm.h */
+
+ #ifdef CONFIG_ARCH_USES_HIGH_VMA_FLAGS
+ #define VM_HIGH_ARCH_BIT_0	32
+ ...
+ #define VM_HIGH_ARCH_BIT_5	37
+<+>+#define VM_HIGH_ARCH_BIT_6	39</+>
+<+>+#define VM_HIGH_ARCH_BIT_7	40</+>
+ #define VM_HIGH_ARCH_0	BIT(VM_HIGH_ARCH_BIT_0)
+ ...
+ #define VM_HIGH_ARCH_5	BIT(VM_HIGH_ARCH_BIT_5)
+<+>+#define VM_HIGH_ARCH_6	BIT(VM_HIGH_ARCH_BIT_6)</+>
+<+>+#define VM_HIGH_ARCH_7	BIT(VM_HIGH_ARCH_BIT_7)</+>
+ #endif /* CONFIG_ARCH_USES_HIGH_VMA_FLAGS */
+ ...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+/* Page tables for this vma should be replicated during page faults */</+>
+<+>+#define VM_REPLICA_INIT	VM_HIGH_ARCH_6</+>
+<+>+/*</+>
+<+>+ * Phys memory of this vma might/should be replicated.</+>
+<+>+ * If this flag is set, VM_REPLICA_INIT also must be set.</+>
+<+>+ */</+>
+<+>+#define VM_REPLICA_COMMIT	VM_HIGH_ARCH_7</+>
+<+>+#endif /* CONFIG_USER_REPLICATION */</+>
+\end{lstlisting}
+\begin{lstlisting}[
+    style=normal,
+    caption={Флаги репликации для виртуальных областей памяти},
+    label={lst:vm_replica_flags}
+]
+/* include/linux/numa_user_replication.h */
+
+#ifdef CONFIG_USER_REPLICATION
+...
+static inline bool numa_is_vma_replicant(struct vm_area_struct *vma) {
+	return vma->vm_flags & VM_REPLICA_INIT;
+}
+
+static inline bool vma_has_replicas(struct vm_area_struct *vma) {
+	return vma->vm_flags & VM_REPLICA_COMMIT;
+}
+...
+#else
+...
+static inline bool numa_is_vma_replicant(struct vm_area_struct *vma) {
+	return 0;
+}
+
+static inline bool vma_has_replicas(struct vm_area_struct *vma) {
+	return 0;
+}
+...
+#endif /* CONFIG_USER_REPLICATION */
+\end{lstlisting}
+
+Однако сами флаги репликации устанавливаются в соответствии с выбранными политиками репликации, на которых основан пользовательский интерфейс механизма (см главу~\ref{sec:Chapter3_user_API}). Политики задаются на уровне виртуального адресного пространства процесса, которое в Linux представляется структурой \texttt{mm\_struct}. Для хранения текущих настроек репликации в неё было добавлено соответствующее поле (см листинг~\ref{lst:mm_struct}).
+
+\begin{lstlisting}[style=diff]
+ /* include/linux/mm_types.h */
+
+<+>+enum table_replication_policy_t {</+>
+<+>+	/* no table replication */</+>
+<+>+	TABLE_REPLICATION_NONE = 0,</+>
+<+>+	/* replicate minimal amount to support RO-data replication */</+>
+<+>+	TABLE_REPLICATION_MINIMAL,</+>
+<+>+	/* replicate all tables */</+>
+<+>+	TABLE_REPLICATION_ALL</+>
+<+>+};</+>
+<+>+</+>
+<+>+enum data_replication_policy_t {</+>
+<+>+	/* no data replicas at all */</+>
+<+>+	DATA_REPLICATION_NONE = 0,</+>
+<+>+	/* replicas are created on demand via numa balancer */</+>
+<+>+	DATA_REPLICATION_ON_DEMAND,</+>
+<+>+	/* all ro-data always replicated */</+>
+<+>+	DATA_REPLICATION_ALL</+>
+<+>+};</+>
+<+>+</+>
+<+>+struct numa_replication_policy_t {</+>
+<+>+	enum table_replication_policy_t table_policy:3;</+>
+<+>+	enum data_replication_policy_t data_policy:3;</+>
+<+>+};</+>
+<+>+</+>
+ ...
+ struct mm_struct {
+     ...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+    struct numa_replication_policy_t replication_policy;</+>
+<+>+#endif</+>
+ };
+\end{lstlisting}
+
+\begin{lstlisting}[
+    style=normal,
+    caption={Политики NUMA-репликации},
+    label={lst:mm_struct}
+]
+/* include/linux/numa_user_replication.h */
+
+#ifdef CONFIG_USER_REPLICATION
+...
+static inline enum table_replication_policy_t
+get_table_replication_policy(struct mm_struct *mm) {
+	return mm->replication_policy.table_policy;
+}
+
+static inline enum data_replication_policy_t
+get_data_replication_policy(struct mm_struct *mm) {
+	return mm->replication_policy.data_policy;
+}
+...
+#endif /* CONFIG_USER_REPLICATION */
+\end{lstlisting}
+
+Таким образом, реализована инфраструктура, необходимая для назначения виртуальным областям памяти соответствующих флагов репликации. Установка флагов должна выполняться всякий раз, когда создаётся новая виртуальная область либо изменяются атрибуты уже существующей области, например, при обработке системных вызовов \texttt{mmap} и \texttt{mprotect}. Соответствующие изменения показаны в листинге~\ref{lst:vmflags_modify_replica}.
+
+\begin{lstlisting}[style=normal]
+/* include/linux/numa_user_replication.h */
+
+#ifdef CONFIG_USER_REPLICATION
+...
+/* true if vma with @vm_flags is suitable for data replication */
+static inline bool __vmflags_replica_candidate(vm_flags_t vm_flags) {
+	return (vm_flags & VM_ACCESS_FLAGS) &&
+        !(vm_flags & (VM_WRITE | VM_SHARED));
+}
+
+/* true if vma with @vm_flags is ready for VM_REPLICA_COMMIT flag, i.e.
+ * it is suitable for data replication and VM_REPLICA_INIT is already
+ * set */
+static inline bool vmflags_might_be_replicated(vm_flags_t vm_flags) {
+	return (vm_flags & VM_REPLICA_INIT) && (vm_flags & VM_ACCESS_FLAGS) &&
+        !(vm_flags & (VM_WRITE | VM_SHARED));
+}
+
+/* set replication flags of @vm_flags according to @mm's policies */
+static inline void vmflags_modify_replica(
+    struct mm_struct *mm, unsigned long *vm_flags) {
+	*vm_flags &= ~(VM_REPLICA_INIT | VM_REPLICA_COMMIT);
+
+	if ((get_table_replication_policy(mm) == TABLE_REPLICATION_ALL) ||
+		(get_table_replication_policy(mm) == TABLE_REPLICATION_MINIMAL &&
+			__vmflags_replica_candidate(*vm_flags))) {
+		*vm_flags |= VM_REPLICA_INIT;
+		if (get_data_replication_policy(mm) != DATA_REPLICATION_NONE &&
+				vmflags_might_be_replicated(*vm_flags))
+			*vm_flags |= VM_REPLICA_COMMIT;
+	}
+}
+...
+#endif /* CONFIG_USER_REPLICATION */
+\end{lstlisting}
+\begin{lstlisting}[
+    style=diff,
+    caption={Установка флагов репликации новым/модифицированным областям},
+    label={lst:vmflags_modify_replica}
+]
+ /* mm/mmap.c */
+
+ unsigned long do_mmap(struct file *file, unsigned long addr,
+             unsigned long len, unsigned long prot,
+ 	         unsigned long flags, vm_flags_t vm_flags,
+ 			 unsigned long pgoff, unsigned long *populate,
+ 			 struct list_head *uf)
+ {
+     struct mm_struct *mm = current->mm;
+     ...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+    vmflags_modify_replica(mm, &vm_flags);</+>
+<+>+#endif</+>
+     addr = mmap_region(file, addr, len, vm_flags, pgoff, uf);
+     ...
+     return addr;
+ }
+
+ /* mm/mprotect.c */
+
+ static int do_mprotect_pkey(unsigned long start, size_t len,
+         unsigned long prot, int pkey)
+ {
+     unsigned long end;
+     struct vm_area_struct *vma;
+     struct vma_iterator vmi;
+     ...
+     for_each_vma_range(vmi, vma, end) {
+         unsigned long mask_off_old_flags, newflags;
+         int new_vma_pkey;
+         ...
+         newflags = calc_vm_prot_bits(prot, new_vma_pkey);
+         newflags |= (vma->vm_flags & ~mask_off_old_flags);
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+        if (vma->vm_mm)</+>
+<+>+            vmflags_modify_replica(vma->vm_mm, &newflags);</+>
+<+>+#endif</+>
+         ...
+     }
+     ...
+ }
+\end{lstlisting}
+
+Помимо этого флаги репликации приходится синхронно обновлять существующим областям при изменении процессом политик репликации таблиц трансляций и/или данных. На листинге~\ref{lst:numa_mm_handle_table_replication} показан код для смен политик репликации таблиц с \texttt{All} на \texttt{Minimal} и с \texttt{None} на \texttt{Minimal}. Кроме обновления флагов подходящим виртуальным областям инициируются операции репликации и дерепликации таблиц трансляций. Код для остальных переходов между политиками устроен аналогичным образом и отличается лишь набором областей, состояние которых необходимо изменить.
+
+\begin{lstlisting}[
+    style=normal,
+    caption={Установка флага репликации таблиц трансляций при смене политики},
+    label={lst:numa_mm_handle_table_replication}
+]
+/* mm/numa_user_replication.c */
+
+/* called when table replication policy goes from All to Minimal */
+static void dereplicate_all2min_pgtables(struct mm_struct *mm) {
+	struct vm_area_struct *vma;
+    ...
+	do {
+		unsigned long addr = vma->vm_start;
+		struct vm_area_struct *next;
+        ...
+        /* clear VM_REPLICA_INIT and dereplicate
+         * pgtables for not replica candidate vmas */
+		if (numa_is_vma_replicant(vma) && !vma_might_be_replicated(vma)) {
+			vm_flags_clear(vma, VM_REPLICA_INIT);
+			...
+			dereplicate_pgtables_pgd_range(&tlb, addr, vma->vm_end, ...);
+		}
+		vma = next;
+	} while (vma);
+    ...
+}
+
+static void numa_mm_table_replication_minimal(struct mm_struct *mm) {
+	switch (get_table_replication_policy(mm)) {
+    /* executed when table replication policy goes from None to Minimal */
+	case TABLE_REPLICATION_NONE: {
+		struct vm_area_struct *vma;
+		MA_STATE(mas, &mm->mm_mt, 0, 0);
+
+		mas_for_each(&mas, vma, ULONG_MAX) {
+            /* set VM_REPLICA_INIT and replicate
+             * pgtables for replica candidate vmas */
+			if (vma_replica_candidate(vma)) {
+				vm_flags_set(vma, VM_REPLICA_INIT);
+				replicate_pgtables_vma(vma);
+			}
+		}
+		break;
+	}
+	case TABLE_REPLICATION_MINIMAL:
+		return;
+	case TABLE_REPLICATION_ALL:
+		dereplicate_all2min_pgtables(mm);
+		break;
+	}
+
+	set_table_replication_policy(mm, TABLE_REPLICATION_MINIMAL);
+}
+\end{lstlisting}
+
+Аналогичным образом реализовано изменение политики репликации данных. На листинге~\ref{lst:numa_mm_handle_data_replication} показаны переходы с \texttt{Lazy}/\texttt{All} на \texttt{None} и с \texttt{Lazy/None} на \texttt{All}. Вместе со сменой флагов выполняется репликация и дерепликация соответствующих физических страниц. Однако следует отметить, что при переходе с \texttt{None} на \texttt{Lazy} выполняется только обновление флагов, репликация данных осуществляется отложено при обработках \textit{NUMA hinting faults} (см главу~\ref{sec:Chapter3_data_repl_policies}).
+
+\begin{lstlisting}[
+    style=normal,
+    caption={Установка флага репликации данных при смене политики},
+    label={lst:numa_mm_handle_data_replication}
+]
+/* mm/numa_user_replication.c */
+
+static bool numa_mm_data_replication_none(struct mm_struct *mm) {
+	switch (get_data_replication_policy(mm)) {
+	case DATA_REPLICATION_NONE:
+		return true;
+    /* executed when data replication policy
+     * goes from Lazy/All to None */
+	case DATA_REPLICATION_ON_DEMAND:
+	case DATA_REPLICATION_ALL: {
+		struct vm_area_struct *vma;
+		MA_STATE(mas, &mm->mm_mt, 0, 0);
+
+		mas_for_each(&mas, vma, ULONG_MAX) {
+            /* deduplicate data and clear VM_REPLICA_COMMIT
+             * for all has_replicas vmas */
+			if (vma_has_replicas(vma)) {
+				vma_start_write(vma);
+				if (phys_deduplicate(vma,
+						vma->vm_start, vma->vm_end - vma->vm_start))
+					return false;
+				__vm_flags_mod(vma, VM_NONE, VM_REPLICA_COMMIT);
+			}
+		}
+		break;
+	}
+	}
+
+	set_data_replication_policy(mm, DATA_REPLICATION_NONE);
+	return true;
+}
+
+static bool numa_mm_data_replication_all(struct mm_struct *mm) {
+	switch (get_data_replication_policy(mm)) {
+    /* executed when data replication policy
+     * goes from Lazy/None to All */
+	case DATA_REPLICATION_NONE:
+	case DATA_REPLICATION_ON_DEMAND: {
+		struct vm_area_struct *vma;
+		MA_STATE(mas, &mm->mm_mt, 0, 0);
+
+		mas_for_each(&mas, vma, ULONG_MAX) {
+            /* set VM_REPLICA_COMMIT an duplicate data
+             * for all replica candidate vmas */
+			if (vma_might_be_replicated(vma))
+				vm_flags_set(vma, VM_REPLICA_COMMIT);
+			if (vma_has_replicas(vma))
+				phys_duplicate(vma,
+                    vma->vm_start, vma->vm_end - vma->vm_start);
+		}
+		break;
+	}
+	case DATA_REPLICATION_ALL:
+		return true;
+	}
+
+	set_data_replication_policy(mm, DATA);
+	return true;
+}
+\end{lstlisting}
+
+\subsubsection{Физический уровень}
+
+% Моя стратегия теперь следующая:
+% 1. Сначала рассказать про виртуальный уровень. Это то, с чего и нужно начинать, потому что это плавный переход от интерфейса политик, к недрам реализации.
+% 2. Во второй подглаве я пожалуй сделаю отступление и расскажу про тонкости физического уровня:
+%    * PG_replicated флаг;
+%    * master page table lock (единый для всех таблиц-реплик);
+%    * кольцевой список таблиц-реплик для итерирования.
+% 3. Далее в ход пойдет репликация таблиц на page fault-ах.
+% 4. Репликация даных + модель ее вызова при политиках Lazy и All.
+% 5. Дерепликация таблиц и данных.
