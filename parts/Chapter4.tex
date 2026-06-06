@@ -362,13 +362,270 @@ static bool numa_mm_data_replication_all(struct mm_struct *mm) {
 \end{lstlisting}
 
 \subsubsection{Физический уровень}
+\label{sec:Chapter4_phys_layer}
+
+Перед тем как перейти непосредственно к репликации/дерепликации физических страниц, будь то страницы с таблицами трансляций или страницы с данными, необходимо рассмотреть несколько вспомогательных сущностей физического уровня, введённых для нужд репликации.
+
+Физическое адресное пространство разбито на страницы, каждая из которых в Linux имеет \texttt{page}-дескриптор~--- экземпляр структуры \texttt{page}, содержащий всю информацию о ней. Как и в случае виртуальных областей памяти, одним из основных атрибутов физической страницы, являются флаги (см листинг~\ref{lst:page})~--- они также представляют собой битовую маску, в которой каждый бит соответствует определённому свойству страницы.
+
+\begin{lstlisting}[
+    style=normal,
+    caption={Флаги физической страницы},
+    label={lst:page}
+]
+/* include/linux/mm_types.h */
+
+struct page {
+    unsigned long flags;
+    ...
+};
+\end{lstlisting}
+
+Для обозначения реплицированности физической страницы был добавлен флаг \texttt{PG\_replicated} (см листинг~\ref{lst:PG_replicated}). Он выставляется у всех реплицированных страниц~--- как у страниц с пользовательскими данными, так и у страниц с таблицами трансляций.
+
+\begin{lstlisting}[
+	style=diff,
+	caption={Флаг для реплицированных физических страниц},
+	label={lst:PG_replicated}
+]
+ /* include/linux/page-flags.h */
+
+ enum pageflags {
+	 PG_locked,
+	 ...
+<+>+</+>
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 PG_replicated,</+>
+<+>+#endif</+>
+ 	 __NR_PAGEFLAGS,
+	 ...
+ };
+ ...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+PAGEFLAG(Replicated, replicated, PF_ANY)</+>
+<+>+#else</+>
+<+>+PAGEFLAG_FALSE(Replicated, replicated)</+>
+<+>+#endif</+>
+<+>+</+>
+ ...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+#define __PG_REPLICATED		(1UL << PG_replicated)</+>
+<+>+#else</+>
+<+>+#define __PG_REPLICATED		0</+>
+<+>+#endif</+>
+<+>+</+>
+ /*
+  * Flags checked when a page is freed.  Pages being freed should not have
+  * these flags set.  If they are, there is a problem.
+  */
+ #define PAGE_FLAGS_CHECK_AT_FREE					\
+ 	 1UL << PG_private    | 1UL << PG_private_2 |	\
+ 	 1UL << PG_writeback  | 1UL << PG_reserved  |	\
+ 	 1UL << PG_slab       | 1UL << PG_active    |	\
+<->-	 1UL << PG_unevictable| __PG_MLOCKED | LRU_GEN_MASK)</->
+<+>+	 1UL << PG_unevictable| __PG_REPLICATED | __PG_MLOCKED | LRU_GEN_MASK)</+>
+\end{lstlisting}
+
+Такое архитектурное решение накладывает небольшое ограничение на репликацию данных, которые могут разделяться между несколькими процессами. Необходимо исключать ситуации, когда одна и та же страница с данными реплицирована в контексте одного процесса и не реплицирована в контексте другого (см рис.~\ref{fig:data_repl_err}), поскольку значение флага \texttt{PG\_replicated} является общим для страницы. Именно поэтому при репликации и дерепликации данных исходная страница никогда не переиспользуется в качестве страницы-реплики (см главу~\ref{sec:Chapter3_data_repl}), а страница-реплика~--- в качестве оригинальной страницы (см главу~\ref{sec:Chapter3_data_table_derepl}).
+
+Рассмотрим теперь особенности реализации реплицированных таблиц трансляций. В Linux для таблиц уровней PMD и PTE ассоциированы собственные блокировки для сериализации их модификаций. Чтобы согласованно модифицировать таблицы-реплики, необходимо использовать общую для них блокировку~--- об этом уже шла речь в предыдущих главах. Для этого среди таблиц-реплик фиксируется одна \textit{мастер}-таблица, блокировка которой и используется. И чтобы иметь доступ к этой блокировке из контекста любой таблицы-реплики, в каждой из них хранится указатель на \textit{мастер}-таблицу.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{data_repl_err.pdf}
+    \caption{Невалидное состояние страницы с данными, при котором для одного процесса она реплицирована, а для другого~--- нет}
+    \label{fig:data_repl_err}
+\end{figure}
+
+Для указателя на \textit{мастер}-таблицу добавлено специальное поле в \texttt{ptdesc}-дескрипторе~--- структуре-алиасе \texttt{page}-дескриптора, содержащей поля специально для таблиц трансляций (см листинг~\ref{lst:master_table}). Новое поле добавлено в одно из существующих объединений, поэтому размер структуры остаётся неизменным, а с другими полями объединения оно не конфликтует, т.к. они используются только в архитектурах x86 и PowerPC, не в arm64. Первоначально каждая таблица является сама себе \textit{мастер}-таблицей, однако в процессе репликации соответствующие указатели обновляются.
+
+\begin{lstlisting}[
+	style=diff,
+	caption={Использование блокировки \textit{мастер}-таблицы},
+	label={lst:master_table}
+]
+ /* include/linux/mm_types.h */
+
+ struct ptdesc {
+	 ...
+	 union {
+		 struct mm_struct *pt_mm; /* Used for x86 pgds. */
+		 atomic_t pt_frag_refcount; /* Powerpc only. */
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+		 struct ptdesc *master_table;</+>
+<+>+#endif</+>
+	 };
+
+	 union {
+ #if ALLOC_SPLIT_PTLOCKS
+		 spinlock_t *ptl;
+ #else
+		 spinlock_t ptl;
+ #endif
+	 };
+	 ...
+ };
+
+ /* include/linux/mm.h */
+
+ #if USE_SPLIT_PTE_PTLOCKS
+ #if ALLOC_SPLIT_PTLOCKS
+ ...
+ bool ptlock_alloc(struct ptdesc *ptdesc);
+ void ptlock_free(struct ptdesc *ptdesc);
+
+ static inline spinlock_t *ptlock_ptr(struct ptdesc *ptdesc) {
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 return ptdesc->master_table->ptl;</+>
+<+>+#else</+>
+	 return ptdesc->ptl;
+<+>+#endif</+>
+ }
+ #else /* ALLOC_SPLIT_PTLOCKS */
+ ...
+ static inline bool ptlock_alloc(struct ptdesc *ptdesc) {
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 ptdesc->master_table = ptdesc;</+>
+<+>+#endif</+>
+	 return true;
+ }
+
+ static inline void ptlock_free(struct ptdesc *ptdesc) {
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 ptdesc->master_table = NULL;</+>
+<+>+#endif</+>
+ }
+
+ static inline spinlock_t *ptlock_ptr(struct ptdesc *ptdesc) {
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 return &ptdesc->master_table->ptl;</+>
+<+>+#else</+>
+	 return &ptdesc->ptl;
+<+>+#endif</+>
+ }
+ #endif /* ALLOC_SPLIT_PTLOCKS */
+ ...
+ #endif /* USE_SPLIT_PTE_PTLOCKS */
+\end{lstlisting}
+
+Следующая вспомогательная сущность тоже касается реплицированных таблиц трансляций. Для согласованного изменения всех таблиц-реплик необходимо иметь возможность последовательно обходить их. Для этого они объединяются в циклический односвязный список с помощью нового поля в \texttt{ptdesc}-дескрипторе (см листинг~\ref{lst:replica_list}). Размер структуры всё также остаётся неизменным, потому что новое поле добавлено в объединение с уже существующим. И конфликтов с ним также не возникнет, поскольку существующее поле является алиасом одноимённого поля структуры \texttt{page}, не используемого для таблиц трансляций. В процессе репликации таблицы-реплики соединяются в список, после чего его обход может выполняться с помощью макросов \texttt{for\_each\_pgtable} и \texttt{for\_each\_pgtable\_replica} (см листинг~\ref{lst:replica_list}).
+
+\begin{lstlisting}[style=diff]
+ /* include/linux/llist.h */
+
+ struct llist_head {
+	 struct llist_node *first;
+ };
+ 
+ struct llist_node {
+	 struct llist_node *next;
+ };
+
+ /* include/linux/mm_types.h */
+
+ struct ptdesc {
+	 ...
+<->-	 unsigned long __page_mapping; /* Unused for page tables. */</->
+<+>+	 union {</+>
+<+>+		 unsigned long __page_mapping; /* Unused for page tables. */</+>
+<+>+		 struct llist_head replica_list_head;</+>
+<+>+		 struct llist_node replica_list_node;</+>
+<+>+	 };</+>
+	 ...
+ };
+\end{lstlisting}
+\begin{lstlisting}[
+	style=normal,
+	caption={Циклический односвязный список таблиц-реплик},
+	label={lst:replica_list}
+]
+/* include/linux/numa_user_replication.h */
+
+#ifdef CONFIG_USER_REPLICATION
+...
+/**
+ * @pos:	struct ptdesc* of current replica
+ * @table:	current table entry to write (virtual address)
+ * @head_table:	table entry to start with, will be a part of this loop
+ * @nid:	node id of current pgtable
+ * @offset:	offset of current table entry in table page in bytes
+ * @start:	boolean value for tmp storage
+ */
+#define for_each_pgtable(pos, table, head_table, nid, offset, start)	\
+	for (pos = llist_entry(									\
+			&virt_to_ptdesc(head_table)->replica_list_node,	\
+		typeof(*pos), replica_list_node),					\
+	    start = true, nid = page_to_nid(ptdesc_page(pos)),	\
+	    offset = offset_in_table(head_table),				\
+		table = (typeof(table))get_table_ptr(pos, offset);	\
+	    pos != virt_to_ptdesc(head_table) || start;			\
+	    pos = llist_entry((pos)->replica_list_node.next,	\
+			typeof(*pos), replica_list_node),				\
+	    table = (typeof(table))get_table_ptr(pos, offset),	\
+	    nid = page_to_nid(ptdesc_page(pos)), start = false)
+
+/**
+ * @pos:	struct ptdesc* of current replica
+ * @table:	current table entry to write (virtual address)
+ * @head_table:	table entry to start with, will not be a part of this loop
+ * @offset:	offset of current table entry in table page in bytes
+ */
+#define for_each_pgtable_replica(pos, table, head_table, offset)	\
+	for (pos = llist_entry(										\
+			virt_to_ptdesc(head_table)->replica_list_node.next,	\
+		typeof(*pos), replica_list_node),					\
+	    offset = offset_in_table(head_table),				\
+		table = (typeof(table))get_table_ptr(pos, offset);	\
+	    pos != virt_to_ptdesc(head_table);					\
+	    pos = llist_entry((pos)->replica_list_node.next,	\
+			typeof(*pos), replica_list_node),				\
+	    table = (typeof(table))get_table_ptr(pos, offset))
+...
+#endif /* CONFIG_USER_REPLICATION */
+\end{lstlisting}
+
+Последнее, о чём в данной главе стоит сказать --- это корень иерархии таблиц трансляций, PGD-уровень. В отсутствии репликации он состоит из единственной PGD-таблицы, указатель на которую хранится в специальном поле \texttt{pgd} структуры \texttt{mm\_struct}. Но при использовании механизма репликации для каждой NUMA-ноды создаётся собственная PGD-таблица. Такие таблицы аллоцируются при иницилизации нового экземпляра \texttt{mm\_struct}, а указатели на них сохраняются в специальном массиве, доступном через новое поле данной структуры (см листинг~\ref{lst:pgd_numa}).
+
+\begin{lstlisting}[style=diff]
+ /* include/linux/mm_types.h */
+
+ struct mm_struct {
+	 struct {
+		 ...
+		 pgd_t *pgd;
+		 ...
+	 };
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 pgd_t **pgd_numa;</+>
+<+>+#endif</+>
+	 ...
+ };
+\end{lstlisting}
+\begin{lstlisting}[
+	style=normal,
+	caption={Указатели на реплицированные PGD-таблицы доступны через \texttt{mm\_struct}},
+	label={lst:pgd_numa}
+]
+/* include/linux/numa_user_replication.h */
+
+#ifdef CONFIG_USER_REPLICATION
+...
+#define this_node_pgd(mm) ((mm)->pgd_numa[numa_node_id()])
+...
+#else
+...
+#define this_node_pgd(mm) ((mm)->pgd)
+...
+#endif /* CONFIG_USER_REPLICATION */
+\end{lstlisting}
 
 % Моя стратегия теперь следующая:
 % 1. Сначала рассказать про виртуальный уровень. Это то, с чего и нужно начинать, потому что это плавный переход от интерфейса политик, к недрам реализации.
 % 2. Во второй подглаве я пожалуй сделаю отступление и расскажу про тонкости физического уровня:
 %    * PG_replicated флаг;
 %    * master page table lock (единый для всех таблиц-реплик);
-%    * кольцевой список таблиц-реплик для итерирования.
+%    * кольцевой список таблиц-реплик для итерирования;
+%    * массив pgd_numa со всеми PGD_таблицами-репликами.
 % 3. Далее в ход пойдет репликация таблиц на page fault-ах.
 % 4. Репликация даных + модель ее вызова при политиках Lazy и All.
 % 5. Дерепликация таблиц и данных.
