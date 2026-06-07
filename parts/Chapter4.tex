@@ -619,6 +619,243 @@ struct page {
 #endif /* CONFIG_USER_REPLICATION */
 \end{lstlisting}
 
+\subsubsection{Репликация таблиц трансляций}
+
+Репликация таблиц трансляций происходит в процессе обработки ошибок страниц, которые в Linux выполняются в два этапа:
+\begin{enumerate}
+	\item сначала по виртуальному адресу, привёдшему к ошибке, выполняется последовательный спуск по уровням иерархии таблиц трансляций с аллокацией недостающих таблиц;
+	\item затем определяются и выполняются необходимые действия на уровне соответствующей PTE-записи и страницы с данными.
+\end{enumerate}
+
+Репликация таблиц целиком и полностью происходит на первом этапе. Для этого стандартные функции спуска по иерархии таблиц трансляций были заменены модифицированными версиями, которые помимо выделения отсутствующих таблиц выполняют их репликацию при необходимости (см листинг~\ref{lst:handle_mm_fault}).
+
+\begin{lstlisting}[
+	style=diff,
+	caption={Спуск в иерархии таблиц трансляций в процессе обработки ошибки страниц},
+	label={lst:handle_mm_fault}
+]
+ /* mm/memory.c */
+
+ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
+	 unsigned long address, unsigned int flags)
+ {
+	 struct vm_fault vmf = {...};
+	 struct mm_struct *mm = vma->vm_mm;
+	 pgd_t *pgd;
+	 p4d_t *p4d;
+	 ...
+<->-	 pgd = pgd_offset(mm, address);</->
+<->-	 p4d = p4d_alloc(mm, pgd, address);</->
+<+>+	 pgd = fault_pgd_offset(&vmf, address);</+>
+<+>+	 p4d = fault_p4d_alloc(&vmf, mm, pgd, address);</+>
+	 ...
+<->-	 vmf.pud = pud_alloc(mm, p4d, address);</->
+<+>+	 vmf.pud = fault_pud_alloc(&vmf, mm, p4d, address);</+>
+	 ...
+<->-	 vmf.pmd = pmd_alloc(mm, vmf.pud, address);</->
+<+>+	 vmf.pmd = fault_pmd_alloc(&vmf, mm, vmf.pud, address);</+>
+	 ...
+<+>+	 if (fault_pte_alloc(&vmf))</+>
+<+>+		 return VM_FAULT_OOM;</+>
+	 return handle_pte_fault(&vmf);
+ }
+\end{lstlisting}
+
+Реализация этих функций приведена в листинге~\ref{lst:fault_pxx_alloc}. Все они имеют одинаковую структуру. Сначала функции семейства \texttt{replication\_path\_p*d} определяют необходимость репликации соответствующего уровня таблиц трансляции. Решение принимается на основе флагов виртуальной области памяти, содержащей обрабатываемый адрес, а также текущего состояния данного уровня таблиц, в частности факта его существования и состояния репликации. Затем функции семейства \texttt{replication\_handle\_p**\_fault} выполняют непосредственно репликацию, если она требуется.
+
+Если же репликация не требуется, или она вовсе выключена, выполняются стандартные функции семейства \texttt{p*d\_alloc}, используемые в немодифицированном Linux.
+
+\begin{lstlisting}[
+	style=normal,
+	caption={Модифицированные функции для спуска, аллокации и репликации таблиц трансляций},
+	label={lst:fault_pxx_alloc}
+]
+/* include/linux/numa_user_replication.h */
+
+#ifdef CONFIG_USER_REPLICATION
+...
+pgd_t *fault_pgd_offset(struct vm_fault *vmf, unsigned long address) {
+	vmf->pgd = pgd_offset_pgd(this_node_pgd(vmf->vma->vm_mm), address);
+	return vmf->pgd;
+}
+
+p4d_t *fault_p4d_alloc(struct vm_fault *vmf, struct mm_struct *mm,
+	pgd_t *pgd, unsigned long address) {
+	if (replication_path_pgd(vmf)) {
+		if (replication_handle_p4d_fault(vmf))
+			return NULL;
+	} else
+		vmf->p4d = p4d_alloc(mm, pgd, address);
+	return vmf->p4d;
+}
+
+pud_t *fault_pud_alloc(struct vm_fault *vmf, struct mm_struct *mm,
+	p4d_t *p4d, unsigned long address) {
+	if (replication_path_p4d(vmf)) {
+		if (replication_handle_pud_fault(vmf))
+			return NULL;
+	} else
+		vmf->pud = pud_alloc(mm, p4d, address);
+	return vmf->pud;
+}
+
+pmd_t *fault_pmd_alloc(struct vm_fault *vmf, struct mm_struct *mm,
+	pud_t *pud, unsigned long address) {
+	if (replication_path_pud(vmf)) {
+		if (replication_handle_pmd_fault(vmf))
+			return NULL;
+	} else
+		vmf->pmd = pmd_alloc(mm, pud, address);
+	return vmf->pmd;
+}
+
+int fault_pte_alloc(struct vm_fault *vmf) {
+	if (replication_path_pmd(vmf))
+		return replication_handle_pte_fault(vmf);
+	return 0;
+}
+...
+#else
+...
+static inline pgd_t *fault_pgd_offset(struct vm_fault *vmf,
+	unsigned long address) {
+	return pgd_offset(vmf->vma->vm_mm, address);
+}
+
+static inline p4d_t *fault_p4d_alloc(struct vm_fault *vmf,
+	struct mm_struct *mm, pgd_t *pgd, unsigned long address) {
+	return p4d_alloc(mm, pgd, address);
+}
+
+static inline pud_t *fault_pud_alloc(struct vm_fault *vmf,
+	struct mm_struct *mm, p4d_t *p4d, unsigned long address) {
+	return pud_alloc(mm, p4d, address);
+}
+
+static inline pmd_t *fault_pmd_alloc(struct vm_fault *vmf,
+	struct mm_struct *mm, pud_t *pud, unsigned long address) {
+	return pmd_alloc(mm, pud, address);
+}
+
+static inline int fault_pte_alloc(struct vm_fault *vmf) {
+	return 0;
+}
+...
+#endif /* CONFIG_USER_REPLICATION */
+\end{lstlisting}
+
+На листинге~\ref{lst:replication_handle_pte_fault} приведён код функции \texttt{replication\_handle\_pte\_fault}, выполняющей репликацию PTE-таблиц. Возможны два варианта развития событий, различающиеся исходным состоянием PTE-уровня.
+\begin{enumerate}
+	\item\hypertarget{itm:table_repl_absent}{} PTE-уровень отсутствует и должен быть создан сразу в реплицированном виде.
+
+	В этом случае выполняются следующие действия:
+	\begin{enumerate}
+		\item Создать и подготовить пустые таблицы-реплики. Подготовка включает:
+		\begin{itemize}
+			\item установку \texttt{PG\_replicated} флага всем таблицам-репликам;
+			\item установку указателей на \textit{мастер}-таблицу~--- ей может быть любая из реплик;
+			\item соединение таблиц в циклический односвязный список.
+		\end{itemize}
+		\item Захватить блокировку родительского PMD-уровня и убедиться, что репликация не была выполнена конкурентным потоком.
+		\item Встроить PTE-таблицы-реплики в иерархию.
+	\end{enumerate}
+
+	\item PTE-уровень существует и представлен единственной таблицей, которую необходимо реплицировать.
+
+	В этом случае необходимо:
+	\begin{enumerate}
+		\item Аллоцировать недостающие PTE-таблицы.
+		\item Захватить PMD-блокировку родительского слоя и убедиться, что репликация не была выполнена конкурентным потоком.
+		\item Захватить PTE-блокировку существующей PTE-таблицы~--- это необходимо для фиксации её состояния на время репликации, т.к. она уже встроена в иерархию и может одновременно использоваться другими потоками.
+		\item Только после получения эксклюзивного доступа к существующей PTE-таблице можно приступать к подготовке таблиц-реплик. Подготовка включает все действия, перечисленные для \hyperlink{itm:table_repl_absent}{первого} случая, а также дополнительный этап~--- нужно скопировать содержимое существующей PTE-таблицы в остальные реплики. В качестве \textit{мастер}-таблицы в данном случае используется исходная PTE-таблица, поскольку именно её блокировка удерживается в момент репликации.
+		\item Встроить оставшиеся таблицы в иерархию.
+	\end{enumerate}
+\end{enumerate}
+
+\begin{lstlisting}[
+	style=normal,
+	caption={Репликация PTE-таблиц},
+	label={lst:replication_handle_pte_fault}
+]
+/* mm/numa_user_replication.c */
+
+static vm_fault_t replication_handle_pte_fault(struct vm_fault *vmf)
+{
+	int ret;
+	struct mm_struct *mm = vmf->vma->vm_mm;
+	struct ptdesc *pte_tables[MAX_NUMNODES];
+	spinlock_t *ptl;
+
+	/* true if PTE-level is absent or replicated */
+	if (replicated_pte_level(vmf)) {
+		if (!pmd_none(*vmf->pmd))
+			/* PTE-level is not absent, therefore it is replicated.
+			 * Nothing need to do, returning. */
+			return 0;
+
+		/* PTE-level is absent, we need to create and replicate it */
+
+		/* Allocate and prepare replicated PTE-tables.
+		 * Preparation involves:
+		 * 1. setting PG_replicated flag;
+		 * 2. setting master-table for tables-replicas;
+		 * 3. connecting tables into cyclic linked list.
+		 */
+		ret = prepare_replicated_pte_tables(NUMA_NO_NODE, pte_tables, mm);
+		if (ret)
+			return VM_FAULT_OOM;
+		/* acquire PMD-lock before modifying parent PMD-tables */
+		ptl = pmd_lock(mm, vmf->pmd);
+		if (unlikely(pmd_present(*vmf->pmd))) {
+			/* Someone else has already replicated this level.
+			 * Nothing else need to do, releasing and returning. */
+			spin_unlock(ptl);
+			release_replicated_pte_tables(NUMA_NO_NODE, pte_tables, mm);
+		} else {
+			/* Populate PMD-entries to point to replicated PTE-tables. */
+			sync_replicated_pte_tables(NUMA_NO_NODE, pte_tables,
+				vmf->pmd, mm);
+			spin_unlock(ptl);
+		}
+	} else {
+		/* the only PTE-table exists, we need to replicate it */
+
+		struct page *table_page = pmd_pgtable(*(vmf->pmd));
+		int pte_node = page_to_nid(table_page);
+
+		pte_tables[pte_node] = page_ptdesc(table_page);
+		/* Allocate remaining PTE-tables. */
+		ret = prepare_replicated_pte_tables(pte_node, pte_tables, mm);
+		if (ret)
+			return VM_FAULT_OOM;
+		/* acquire PMD-lock before modifying parent PMD-tables */
+		ptl = pmd_lock(mm, vmf->pmd);
+		if (unlikely(PageReplicated(table_page))) {
+			/* Someone else has already replicated this level.
+			 * Nothing else need to do, releasing and returning. */
+			spin_unlock(ptl);
+			release_replicated_pte_tables(pte_node, pte_tables, mm);
+		} else {
+			/* Acquire PTE-lock of existing PTE-table.
+			 * Prepare replicated PTE-tables, it involves:
+			 * 1. setting PG_replicated flag;
+			 * 2. setting master-table to point on existing PTE-table;
+			 * 3. connecting tables into cyclic linked list;
+			 * 4. copy the contents of existing PTE-table to others.
+			 * Populate PMD-entries to point to replicated PTE-tables.
+			 */
+			sync_replicated_pte_tables(pte_node, pte_tables,
+				vmf->pmd, mm);
+			spin_unlock(ptl);
+		}
+	}
+
+	return 0;
+}
+\end{lstlisting}
+
+Реализация остальных функций семейства \texttt{replication\_handle\_p**\_fault} построена аналогичным образом и отличается лишь оперируемым уровнем иерархии таблиц трансляций.
+
 % Моя стратегия теперь следующая:
 % 1. Сначала рассказать про виртуальный уровень. Это то, с чего и нужно начинать, потому что это плавный переход от интерфейса политик, к недрам реализации.
 % 2. Во второй подглаве я пожалуй сделаю отступление и расскажу про тонкости физического уровня:
