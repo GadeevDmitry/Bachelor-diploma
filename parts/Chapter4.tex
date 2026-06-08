@@ -368,7 +368,7 @@ static bool numa_mm_data_replication_all(struct mm_struct *mm) {
 		return true;
 	}
 
-	set_data_replication_policy(mm, DATA);
+	set_data_replication_policy(mm, DATA_REPLICATION_ALL);
 	return true;
 }
 \end{lstlisting}
@@ -1089,6 +1089,124 @@ int numa_replicate_page(struct vm_fault *vmf)
 <+>+	 }</+>
 <+>+	 /* fallback to migration */</+>
 <+>+#endif</+>
+	 ...
+ }
+\end{lstlisting}
+
+\subsubsection{Дерепликация таблиц трансляций и данных}
+
+Дерепликация таблиц трансляций выполняется при ослаблении политики их репликации. В листинге~\ref{lst:numa_mm_handle_table_replication} показана функция \texttt{dereplicate\_all2min\_pgtables}, вызываемая при переходе политики с \texttt{All} на \texttt{Minimal}. Аналогичным образом функция \texttt{dereplicate\_all\_pgtables} используется при переходе с \texttt{All}/\texttt{Minimal} на \texttt{None}. Эти функции отличаются только множеством оперируемых виртуальных областей, однако обе используют общую функцию \texttt{dereplicate\_pgtables\_pgd\_range}, непосредственно выполняющую дерепликацию таблиц страниц в заданном диапазоне виртуальных адресов.
+
+Функция \texttt{dereplicate\_pgtables\_pgd\_range} выполняет рекурсивный обход иерархии таблиц страниц и последовательно дереплицирует её уровни, начиная с наиболее нижних. На листинге~\ref{lst:dereplicate_pgtables_pte_range} показана функция дерепликации PTE-таблиц. Её работа состоит из следующих шагов: 
+\begin{enumerate}
+	\item в качестве единственной сохраняемой таблицы выбирается \textit{мастер}-таблица;
+	\item записи родительских PMD-таблиц перенаправляются на выбранную \textit{мастер}-таблицу;
+	\item выполняется обход остальных таблиц-реплик, их циклический список разрывается, а флаг \texttt{PG\_replicated} сбрасывается, после чего таблицы освобождаются;
+	\item для \textit{мастер}-таблицы также разрываются связи списка и сбрасывается флаг \texttt{PG\_replicated}.
+\end{enumerate}
+
+Дополнительных сложностей, связанных с синхронизацией, в данном случае не возникает, поскольку дерепликация выполняется во время изменения политики репликации таблиц трансляций, которое происходит при эксклюзивном захвате адресного пространства процесса.
+
+\begin{lstlisting}[
+	style=normal,
+	caption={Дерепликация PTE-таблиц},
+	label={lst:dereplicate_pgtables_pte_range}
+]
+/* mm/numa_user_replication.c */
+
+static void dereplicate_pgtables_pte_range(struct mmu_gather *tlb,
+	pmd_t *pmd, unsigned long addr) {
+	unsigned long offset;
+	struct ptdesc *curr, *tmp;
+	pmd_t *curr_pmd;
+	pte_t *curr_pte;
+	spinlock_t *lock;
+	/* master-table is the only one that will remain */
+	pgtable_t ptetable = ptdesc_page(
+		page_ptdesc(pmd_page(*pmd))->master_table);
+
+	/* nothing need to do if PTE table is not replicated */
+	if (!numa_pgtable_replicated(page_to_virt(ptetable)))
+		return;
+
+	/* Populate PMD-entries to point to the master-table.*/
+
+	lock = pmd_lock(tlb->mm, pmd); /* probably unnecessary */
+	pmd_populate(tlb->mm, pmd, ptetable);
+	for_each_pgtable_replica(curr, curr_pmd, pmd, offset)
+		pmd_populate(tlb->mm, curr_pmd, ptetable);
+	spin_unlock(lock);
+
+	/* Release unneeded tables. */
+	for_each_pgtable_replica(curr, tmp, curr_pte,
+		page_to_virt(ptetable), offset) {
+		/* destroy the cyclic linked list */
+		cleanup_pte_list(ptdesc_page(curr));
+		/* release the table (PG_replicated flag unsetting here) */
+		pte_free_tlb(tlb, ptdesc_page(curr), addr);
+		mm_dec_nr_ptes(tlb->mm);
+	}
+
+	/* destroy the cyclic linked list and
+	 * unset PG_replicated flag for master-table */
+	cleanup_pte_list(ptetable);
+	ClearPageReplicated(ptetable);
+}
+\end{lstlisting}
+
+Что касается дерепликации данных, то её принцип работы подробно рассмотрен в главе~\ref{sec:Chapter3_data_table_derepl}. Приводить здесь реализацию функции нецелесообразно, поскольку она содержит главным образом технические детали и не включает новых архитектурных решений. Поэтому в листинге~\ref{lst:phys_deduplicate} представлен только интерфейс, состоящий из единственной функции \texttt{phys\_deduplicate}.
+
+\begin{lstlisting}[
+	style=normal,
+	caption={Интерфейс для дерепликации данных},
+	label={lst:phys_deduplicate}
+]
+/* include/linux/numa_user_replication.h */
+
+#ifdef CONFIG_USER_REPLICATION
+...
+int phys_deduplicate(struct vm_area_struct *vma,
+	unsigned long start, size_t len);
+...
+#endif /* CONFIG_USER_REPLICATION */
+\end{lstlisting}
+
+Функция \texttt{phys\_deduplicate} используется в двух случаях:
+\begin{enumerate}
+	\item при отключении репликации данных, т.е. переходе на политику \texttt{None} (см листинг~\ref{lst:numa_mm_handle_data_replication});
+	\item в системном вызове \texttt{mprotect}, если изменение прав доступа виртуальной области памяти приводит к тому, что она перестаёт удовлетворять условиям репликации(см листинг~\ref{lst:data_derepl}).
+
+	Здесь следует обратить внимание на эксклюзивный захват \texttt{vma}-блокировки перед выполнением дерепликации данных. Если захватывать её только перед изменением флагов области памяти, то между завершением дерепликации и установкой новых флагов конкурентный поток может повторно выполнить репликацию данных. В результате состояние области памяти станет неконсистентным.
+\end{enumerate}
+
+\begin{lstlisting}[
+	style=diff,
+	caption={Дерепликация данных},
+	label={lst:data_derepl}
+]
+ /* mm/mprotect.c */
+
+ int
+ mprotect_fixup(struct vma_iterator *vmi, struct mmu_gather *tlb,
+	 struct vm_area_struct *vma, struct vm_area_struct **pprev,
+	 unsigned long start, unsigned long end, unsigned long newflags)
+ {
+	...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 if (!(newflags & VM_REPLICA_COMMIT) && vma_has_replicas(vma)) {</+>
+<+>+		 /* We should take vma write lock before phys_deduplicate()</+>
+<+>+		  * to prevent concurents to phys_duplicate() the vma's</+>
+<+>+		  * range again using vma read lock.</+>
+<+>+		  */</+>
+<+>+		 vma_start_write(vma);</+>
+<+>+		 error = phys_deduplicate(vma, start, end - start);</+>
+<+>+		 if (error)</+>
+<+>+			 goto fail;</+>
+<+>+	 }</+>
+<+>+#endif</+>
+	 ...
+	 vma_start_write(vma);
+	 vm_flags_reset(vma, newflags);
 	 ...
  }
 \end{lstlisting}
