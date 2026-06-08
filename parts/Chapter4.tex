@@ -142,9 +142,21 @@ get_table_replication_policy(struct mm_struct *mm) {
 	return mm->replication_policy.table_policy;
 }
 
+static inline void
+set_table_replication_policy(struct mm_struct *mm,
+	enum table_replication_policy_t table_pol) {
+	mm->replication_policy.table_policy = table_pol;
+}
+
 static inline enum data_replication_policy_t
 get_data_replication_policy(struct mm_struct *mm) {
 	return mm->replication_policy.data_policy;
+}
+
+static inline void
+set_data_replication_policy(struct mm_struct *mm,
+	enum data_replication_policy_t data_pol) {
+	mm->replication_policy.data_policy = data_pol;
 }
 ...
 #endif /* CONFIG_USER_REPLICATION */
@@ -342,7 +354,7 @@ static bool numa_mm_data_replication_all(struct mm_struct *mm) {
 		MA_STATE(mas, &mm->mm_mt, 0, 0);
 
 		mas_for_each(&mas, vma, ULONG_MAX) {
-            /* set VM_REPLICA_COMMIT an duplicate data
+            /* set VM_REPLICA_COMMIT and duplicate data
              * for all replica candidate vmas */
 			if (vma_might_be_replicated(vma))
 				vm_flags_set(vma, VM_REPLICA_COMMIT);
@@ -584,7 +596,7 @@ struct page {
 #endif /* CONFIG_USER_REPLICATION */
 \end{lstlisting}
 
-Последнее, о чём в данной главе стоит сказать --- это корень иерархии таблиц трансляций, PGD-уровень. В отсутствии репликации он состоит из единственной PGD-таблицы, указатель на которую хранится в специальном поле \texttt{pgd} структуры \texttt{mm\_struct}. Но при использовании механизма репликации для каждой NUMA-ноды создаётся собственная PGD-таблица. Такие таблицы аллоцируются при иницилизации нового экземпляра \texttt{mm\_struct}, а указатели на них сохраняются в специальном массиве, доступном через новое поле данной структуры (см листинг~\ref{lst:pgd_numa}).
+Последнее, о чём в данной главе стоит сказать~--- это корень иерархии таблиц трансляций, PGD-уровень. В отсутствии репликации он состоит из единственной PGD-таблицы, указатель на которую хранится в специальном поле \texttt{pgd} структуры \texttt{mm\_struct}. Но при использовании механизма репликации для каждой NUMA-ноды создаётся собственная PGD-таблица. Такие таблицы аллоцируются при иницилизации нового экземпляра \texttt{mm\_struct}, а указатели на них сохраняются в специальном массиве, доступном через новое поле данной структуры (см листинг~\ref{lst:pgd_numa}).
 
 \begin{lstlisting}[style=diff]
  /* include/linux/mm_types.h */
@@ -855,6 +867,231 @@ static vm_fault_t replication_handle_pte_fault(struct vm_fault *vmf)
 \end{lstlisting}
 
 Реализация остальных функций семейства \texttt{replication\_handle\_p**\_fault} построена аналогичным образом и отличается лишь оперируемым уровнем иерархии таблиц трансляций.
+
+\subsubsection{Репликация данных}
+
+Основные принципы работы механизма репликации данных были подробно рассмотрены в главе~\ref{sec:Chapter3_data_repl}, а её код содержит преимущественно технические детали, не связанные с новыми архитектурными решениями. По этой причине рассмотрение реализации \texttt{phys\_duplicate} является избыточным, и в листинге~\ref{lst:phys_duplicate} приведён только интерфейс подсистемы репликации данных.
+
+Помимо функции \texttt{phys\_duplicate}, выполняющей репликацию страниц для диапазона виртуальных адресов, интерфейс содержит функцию \texttt{numa\_replicate\_page}, представляющую собой специализированную оболочку для репликации отдельной физической страницы из контекста обработчика ошибок страниц.
+
+\begin{lstlisting}[
+	style=normal,
+	caption={Интерфейс для репликации данных},
+	label={lst:phys_duplicate}
+]
+/* include/linux/numa_user_replication.h */
+
+#ifdef CONFIG_USER_REPLICATION
+...
+int phys_duplicate(struct vm_area_struct *vma,
+	unsigned long start, size_t len);
+int numa_replicate_page(struct vm_fault *vmf)
+...
+#endif /* CONFIG_USER_REPLICATION */
+\end{lstlisting}
+
+Гораздо больший интерес представляет анализ мест вызова данного функционала. Их состав определяется выбранной политикой репликации данных, об этом подробно описано в главе~\ref{sec:Chapter3_data_repl_policies}. Ниже рассмотрим соответствующие изменения на уровне исходного кода.
+
+При использовании политики \texttt{All} репликация данных может выполняться в трёх случаях:
+\begin{enumerate}
+	\item в обработчике ошибок страниц при аллокации новой физической страницы;
+	\item в систеном вызове \texttt{mprotect} при изменении прав доступа виртуальной области памяти таким образом, что она начинает удовлетворять требованиям механизма репликации;
+	\item при переключении политики репликации данных на \texttt{All}.
+\end{enumerate}
+
+Код, реализующий первые два случая, приведён в листинге~\ref{lst:data_replication_all}. Третий случай был рассмотрен ранее в листинге~\ref{lst:numa_mm_handle_data_replication}.
+
+\begin{lstlisting}[
+	style=diff,
+	caption={Репликация данных при установленной политике \texttt{All}},
+	label={lst:data_replication_all}
+]
+ /* mm/memory.c */
+
+ static vm_fault_t do_pte_missing(struct vm_fault *vmf)
+ {
+<+>+	 vm_fault_t ret;</+>
+	 ...
+	 if (vma_is_anonymous(vmf->vma))
+<->-		 return do_anonymous_page(vmf);</->
+<+>+		 ret = do_anonymous_page(vmf);</+>
+	 else
+<->-		 return do_fault(vmf);</->
+<+>+		 ret = do_fault(vmf);</+>
+<+>+</+>
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 if (get_data_replication_policy(vmf->vma->vm_mm) ==</+>
+<+>+		 DATA_REPLICATION_ALL) {</+>
+<+>+		 if (vma_has_replicas(vmf->vma))</+>
+<+>+			 numa_replicate_page(vmf);</+>
+<+>+	 }</+>
+<+>+#endif</+>
+<+>+	 return ret;</+>
+ }
+
+ /* mm/mprotect.c */
+
+ int mprotect_fixup(struct vma_iterator *vmi, struct mmu_gather *tlb,
+	 struct vm_area_struct *vma, struct vm_area_struct **pprev,
+	 unsigned long start, unsigned long end, unsigned long newflags)
+ {
+	 struct mm_struct *mm = vma->vm_mm;
+	 unsigned int mm_cp_flags = 0;
+	 ...
+	 vm_flags_reset(vma, newflags);
+	 if (vma_wants_manual_pte_write_upgrade(vma))
+		 mm_cp_flags |= MM_CP_TRY_CHANGE_WRITABLE;
+	 vma_set_page_prot(vma);
+
+	 change_protection(tlb, vma, start, end, mm_cp_flags);
+
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 if (get_data_replication_policy(mm) == DATA_REPLICATION_ALL) {</+>
+<+>+		 if (vma_has_replicas(vma)) {</+>
+<+>+			 replicate_pgtables_vma(vma);</+>
+<+>+			 phys_duplicate(vma, start, end - start);</+>
+<+>+		 }</+>
+<+>+	 }</+>
+<+>+#endif</+>
+	 ...
+ }
+\end{lstlisting}
+
+В случае политики \texttt{Lazy} механизм репликации реализуется поверх существующего NUMA-балансировщика. Для этого модифицируются как фаза сканирования памяти, так и обработчик \textit{NUMA hinting faults}.
+
+Фаза сканирования состоит из двух этапов:
+\begin{enumerate}
+	\item На первом этапе выполняется обход виртуальных областей памяти и отбор тех из них, которые подлежат дальнейшему участию в механизме.
+
+	Для поддержки репликации внесены изменения, гарантирующие, что виртуальные области памяти с реплицируемыми данными не будут исключаться из рассмотрения независимо от прочих условий (см. функцию \texttt{task\_numa\_work} в листинге~\ref{lst:NUMA_balancer}).
+
+	\item На втором этапе выполняется обход физических страниц, принадлежащих отобранным областям памяти, после чего в соответствующих PTE-записях устанавливается \textit{invalid} бит.
+
+	Единственное изменение на данном этапе заключается в пропуске уже реплицированных страниц, поскольку их появление в обработчике \textit{NUMA hinting faults} не имеет смысла (см. функцию \texttt{change\_pte\_range} в листинге~\ref{lst:NUMA_balancer}).
+\end{enumerate}
+
+\begin{lstlisting}[
+	style=diff,
+	caption={Модифицированная фаза сканирования NUMA-балансировщика},
+	label={lst:NUMA_balancer}
+]
+ /* kernel/sched/fair.c */
+
+ static void task_numa_work(struct callback_head *work)
+ {
+	 struct vm_area_struct *vma;
+	 struct vma_iterator vmi;
+	 ...
+	 for (; vma; vma = vma_next(&vmi)) {
+<->-		 if (!vma_migratable(vma) || !vma_policy_mof(vma) ||</->
+<+>+		 if (!vma_migratable(vma) || (!vma_policy_mof(vma) &&</+>
+<+>+			 !vma_has_replicas(vma)) ||</+>
+			 is_vm_hugetlb_page(vma) || (vma->vm_flags & VM_MIXEDMAP))
+			 continue;
+
+		 /* Avoid hinting faults in read-only file-backed mappings
+		  * as migrating the pages will be of marginal benefit. */
+<+>+</+>
+<+>+		 /* Do not avoid hinting faults in read-only file-backed mappings</+>
+<+>+		  * as replicating the pages should be of significant benefit. */</+>
+<->-		 if (!vma->vm_mm || (vma->vm_file &&</->
+<->-			 (vma->vm_flags & (VM_READ|VM_WRITE)) == (VM_READ)))</->
+<+>+		 if ((!vma->vm_mm || (vma->vm_file &&</+>
+<+>+			 (vma->vm_flags & (VM_READ|VM_WRITE)) == (VM_READ))) &&</+>
+<+>+			 !vma_has_replicas(vma))</+>
+			 continue;
+		 ...
+	 }
+	 ...
+ }
+
+ /* mm/mprotect.c */
+
+ static long change_pte_range(struct mmu_gather *tlb,
+	 struct vm_area_struct *vma, pmd_t *pmd, unsigned long addr,
+	 unsigned long end, pgprot_t newprot, unsigned long cp_flags)
+ {
+	 pte_t *pte, oldpte;
+	 bool prot_numa = cp_flags & MM_CP_PROT_NUMA;
+	 long pages = 0;
+	 ...
+	 do {
+		 oldpte = ptep_get(pte);
+		 if (pte_present(oldpte)) {
+			 ...
+			 if (prot_numa) {
+				 struct page *page;
+				 ...
+<+>+				 /* skip already replicated memory */</+>
+<+>+				 if (PageReplicated(page))</+>
+<+>+				 	 return pages;</+>
+				 ...
+			 }
+			 ...
+		 }
+	 } while (pte++, addr += PAGE_SIZE, addr != end);
+	 ...
+	 return pages;
+ }
+\end{lstlisting}
+
+Последнее изменение относится непосредственно к обработчику \textit{NUMA hinting faults}. Для виртуальных областей памяти, помеченных как реплицируемые, вместо миграции страницы выполняется её репликация (см. листинг~\ref{lst:do_numa_page}).
+
+Следует отметить, что при неудачной попытке репликации система может вернуться к стандартному механизму миграции страниц. Однако это возможно только для тех виртуальных областей памяти, которые удовлетворяют критериям миграции из функции \texttt{task\_numa\_work}, которые были частично ослаблены для поддержки механизма репликации.
+
+\begin{lstlisting}[
+	style=diff,
+	caption={Модифицированный обработчик \textit{NUMA hinting faults}},
+	label={lst:do_numa_page}
+]
+ static vm_fault_t do_numa_page(struct vm_fault *vmf)
+ {
+	 struct vm_area_struct *vma = vmf->vma;
+	 struct page *page = NULL;
+	 int page_nid = NUMA_NO_NODE, target_nid;
+	 ...
+	 target_nid = numa_migrate_prep(
+		 page, vma, vmf->address, page_nid, &flags);
+<->-	 if (target_nid == NUMA_NO_NODE) {</->
+<+>+	 if (target_nid == NUMA_NO_NODE && !vma_has_replicas(vma)) {</+>
+		 put_page(page);
+		 goto out_map;
+	 }
+	 ...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 if (vma_has_replicas(vma)) {</+>
+<+>+		 /* drop the reference count that was</+>
+<+>+		  * elevated in numa_migrate_prep() */</+>
+<+>+		 put_page(folio);</+>
+<+>+</+>
+<+>+		 if (numa_replicate_page(vmf)) {</+>
+<+>+			 /* replication success */</+>
+<+>+			 ...</+>
+<+>+			 return 0;</+>
+<+>+		 }</+>
+<+>+		 /* replication failed */</+>
+<+>+</+>
+<+>+		 /* forbid migration if the condition from</+>
+<+>+		  * kernel/sched/fair.c:task_numa_work()</+>
+<+>+		  * is not satisfied */</+>
+<+>+		 if (vma->vm_file &&</+>
+<+>+			 ((vma->vm_flags & (VM_READ|VM_WRITE)) == VM_READ)) {</+>
+<+>+			 ...</+>
+<+>+			 goto out_map;</+>
+<+>+		 }</+>
+<+>+</+>
+<+>+		 /* forbid migration if the condition from</+>
+<+>+		  * beginning of the function is not satisfied */</+>
+<+>+		 if (target_nid == NUMA_NO_NODE) {</+>
+<+>+			 ...</+>
+<+>+			 goto out_map;</+>
+<+>+		 }</+>
+<+>+	 }</+>
+<+>+	 /* fallback to migration */</+>
+<+>+#endif</+>
+	 ...
+ }
+\end{lstlisting}
 
 % Моя стратегия теперь следующая:
 % 1. Сначала рассказать про виртуальный уровень. Это то, с чего и нужно начинать, потому что это плавный переход от интерфейса политик, к недрам реализации.
