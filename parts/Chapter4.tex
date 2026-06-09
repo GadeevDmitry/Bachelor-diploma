@@ -1239,19 +1239,19 @@ create mode 100644 mm/numa_user_replication.c
 \begin{table}[H]
     \centering
     \begin{tabular}{
-        |>{\centering\arraybackslash}m{5cm}
+        |>{\centering\arraybackslash}m{5cm}|
         |>{\centering\arraybackslash}m{5cm}
 		|>{\centering\arraybackslash}m{5cm}|}
         \hline
-        \textbf{модель CPU} & Kungpeng 920-6426 & Kungpeng 920-4826 \\ \hline
-        \textbf{количество CPUs} & 128 & 96 \\ \hline
-        \textbf{количество NUMA-нод} & 4 & 4 \\ \hline
-        \textbf{DRAM на каждой ноде} & 128 Gb & 96 Gb \\ \hline
-		\textbf{DRAM всего} & 512 Gb & 384 Gb \\ \hline
-		\textbf{L3 cache} & 128 Mb (4 шт) & 128 Mb (4 шт) \\ \hline
-		\textbf{L2 cache} & 64 Mb (128 шт) & 48 Mb (96 шт) \\ \hline
-		\textbf{L1i cache} & 8 Mb (128 шт) & 6 Mb (96 шт) \\ \hline
-		\textbf{L1d cache} & 8 Mb (128 шт) & 6 Mb (96 шт) \\ \hline
+        модель CPU & Kunpeng 920-6426 & Kunpeng 920-4826 \\ \hline
+        количество CPUs & 128 & 96 \\ \hline
+        количество NUMA-нод & 4 & 4 \\ \hline
+        DRAM на каждой ноде & 128 GiB & 96 GiB \\ \hline
+		DRAM всего & 512 GiB & 384 GiB \\ \hline
+		L3 cache & 128 MiB (4 шт) & 128 MiB (4 шт) \\ \hline
+		L2 cache & 64 MiB (128 шт) & 48 MiB (96 шт) \\ \hline
+		L1i cache & 8 MiB (128 шт) & 6 MiB (96 шт) \\ \hline
+		L1d cache & 8 MiB (128 шт) & 6 MiB (96 шт) \\ \hline
     \end{tabular}
     \caption{Спецификация серверов}
     \label{tab:hardware_specification}
@@ -1314,3 +1314,81 @@ do {
 Включение репликации таблиц трансляций \texttt{(All, None)} приводит к заметному снижению объёма межсокетного трафика. В рассматриваемом тесте обращения к таблицам трансляций происходят особенно интенсивно вследствие случайного характера доступа к памяти и большого количества промахов TLB. Каждый промах требует выполнения многоуровневого обхода иерархии таблиц страниц, что при удалённом размещении таблиц создаёт дополнительную нагрузку на межсокетное соединение. Репликация таблиц позволяет устранить этот эффект, вследствие чего производительность удалённого сокета возрастает до уровня локального. Однако данные по-прежнему остаются сосредоточены на одной NUMA-ноде, поэтому перегрузка её контроллера памяти сохраняется.
 
 Наибольший эффект достигается при одновременной репликации таблиц трансляций и данных \texttt{(All, All)}. В этом случае каждая NUMA-нода использует локальные копии как таблиц трансляций, так и пользовательских данных. В результате устраняются как задержки удалённых обращений, так и конкуренция за контроллер памяти исходной NUMA-ноды. Нагрузка распределяется между контроллерами памяти всех узлов системы, что приводит к существенному росту производительности на всех процессорах.
+
+\subsubsection{Настоящие тесты}
+
+Для оценки эффективности механизма репликации в условиях, приближённых к реальным, были использованы следующие тестовые приложения:
+\begin{enumerate}
+	\item бенчмарк для систем управления базами данных \texttt{sysbench}~\cite{sysbench};
+	\item набор прикладных тестов \texttt{Phoronix Test Suite}~\cite{phoronix};
+	\item тест \texttt{spark-tpch}, входящий в состав \texttt{Phoronix Test Suite}.
+\end{enumerate}
+
+Бенчмарк \texttt{sysbench} предназначен для нагрузочного тестирования систем управления базами данных. В рамках данного исследования использовалась СУБД MySQL 8.3. После предварительной подготовки тестовой базы данных \texttt{sysbench} создаёт набор рабочих потоков, которые генерируют запросы к серверу базы данных в соответствии с выбранным сценарием нагрузки. В процессе выполнения собирается статистика производительности, основным показателем которой является число транзакций в секунду (TPS, \textit{transactions per second}).
+
+Бенчмарк позволяет задавать как количество рабочих потоков, так и тип генерируемой нагрузки. В данной работе использовались сценарии \texttt{oltp\_read\_only}, \texttt{oltp\_point\_select} и \texttt{oltp\_select\_random\_points}.
+
+Эксперименты проводились на сервере Kunpeng 920-4826 в конфигурациях \texttt{(None, None)} и \texttt{(All, Lazy)}. Следует отметить, что политики репликации применялись не к самому процессу \texttt{sysbench}, а к серверу базы данных, поскольку именно он выполняет обработку запросов и осуществляет доступ к данным. Размер тестовой базы данных составлял 200~GiB, она полностью размещалась в оперативной памяти.
+
+Результаты сценария \texttt{oltp\_read\_only} представлены в таблице~\ref{tab:oltp_read_only}, сценария \texttt{oltp\_point\_select} --- в таблице~\ref{tab:oltp_point_select}, и \texttt{oltp\_select\_random\_points} --- в таблице~\ref{tab:oltp_select_random_points}.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{
+        |>{\centering\arraybackslash}m{3cm}|
+        |>{\centering\arraybackslash}m{3cm}
+		|>{\centering\arraybackslash}m{3cm}
+		|>{\centering\arraybackslash}m{3cm}|}
+        \hline
+        \multirow{2}{3cm}{Число потоков} & \multicolumn{3}{c|}{Количество транзакций в секунду} \\ \cline{2-4}
+        & (None, None) & (All, Lazy) & $\Delta$ \\ \hline
+        48  & 25222 & 24500 & -2.86\% \\ \hline
+        96  & 42362 & 42878 & +1.22\% \\ \hline
+		192 & 40617 & 40665 & +0.12\% \\ \hline
+		288 & 38334 & 39064 & +1.90\% \\ \hline
+    \end{tabular}
+    \caption{Результаты сценария \texttt{oltp\_read\_only} бенчмарка \texttt{sysbench}}
+    \label{tab:oltp_read_only}
+\end{table}
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{
+        |>{\centering\arraybackslash}m{3cm}|
+        |>{\centering\arraybackslash}m{3cm}
+		|>{\centering\arraybackslash}m{3cm}
+		|>{\centering\arraybackslash}m{3cm}|}
+        \hline
+        \multirow{2}{3cm}{Число потоков} & \multicolumn{3}{c|}{Количество транзакций в секунду} \\ \cline{2-4}
+        & (None, None) & (All, Lazy) & $\Delta$ \\ \hline
+        48  & 550870 & 550170 & -0.13\% \\ \hline
+        96  & 801134 & 802434 & +0.16\% \\ \hline
+		192 & 852841 & 860026 & +0.84\% \\ \hline
+		288 & 794767 & 819655 & +3.13\% \\ \hline
+    \end{tabular}
+    \caption{Результаты сценария \texttt{oltp\_point\_select} бенчмарка \texttt{sysbench}}
+    \label{tab:oltp_point_select}
+\end{table}
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{
+        |>{\centering\arraybackslash}m{3cm}|
+        |>{\centering\arraybackslash}m{3cm}
+		|>{\centering\arraybackslash}m{3cm}
+		|>{\centering\arraybackslash}m{3cm}|}
+        \hline
+        \multirow{2}{3cm}{Число потоков} & \multicolumn{3}{c|}{Количество транзакций в секунду} \\ \cline{2-4}
+        & (None, None) & (All, Lazy) & $\Delta$ \\ \hline
+        48  & 21297 & 23034 & +8.16\% \\ \hline
+        96  & 23201 & 23291 & +0.39\% \\ \hline
+		192 & 21924 & 23597 & +7.63\% \\ \hline
+		288 & 23755 & 23915 & +0.67\% \\ \hline
+    \end{tabular}
+    \caption{Результаты сценария \texttt{oltp\_select\_random\_points} бенчмарка \texttt{sysbench}}
+    \label{tab:oltp_select_random_points}
+\end{table}
+
+Согласно рекомендациям разработчиков \texttt{sysbench}, наиболее показательными являются результаты, полученные при количестве рабочих потоков, превышающем число аппаратных потоков выполнения в системе в 2--3 раза. В рассматриваемой конфигурации это соответствует значениям 192 и 288 потоков. Такой выбор обусловлен тем, что рабочие потоки значительную часть времени проводят в ожидании завершения запросов к базе данных, поэтому увеличение их числа позволяет поддерживать более высокую загрузку вычислительных ресурсов системы.
+
+Полученные результаты демонстрируют положительное влияние механизма репликации на производительность сервера базы данных. Наиболее заметный эффект наблюдается при высокой степени параллелизма, когда нагрузка на подсистему управления памятью становится существенным фактором, ограничивающим производительность.
