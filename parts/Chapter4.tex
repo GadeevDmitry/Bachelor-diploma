@@ -1340,7 +1340,7 @@ do {
 		|>{\centering\arraybackslash}m{3cm}
 		|>{\centering\arraybackslash}m{3cm}|}
         \hline
-        \multirow{2}{3cm}{Число потоков} & \multicolumn{3}{c|}{Количество транзакций в секунду} \\ \cline{2-4}
+        \multirow{2}{*}{Число потоков} & \multicolumn{3}{c|}{Количество транзакций в секунду} \\ \cline{2-4}
         & (None, None) & (All, Lazy) & $\Delta$ \\ \hline
         48  & 25222 & 24500 & -2.86\% \\ \hline
         96  & 42362 & 42878 & +1.22\% \\ \hline
@@ -1359,7 +1359,7 @@ do {
 		|>{\centering\arraybackslash}m{3cm}
 		|>{\centering\arraybackslash}m{3cm}|}
         \hline
-        \multirow{2}{3cm}{Число потоков} & \multicolumn{3}{c|}{Количество транзакций в секунду} \\ \cline{2-4}
+        \multirow{2}{*}{Число потоков} & \multicolumn{3}{c|}{Количество транзакций в секунду} \\ \cline{2-4}
         & (None, None) & (All, Lazy) & $\Delta$ \\ \hline
         48  & 550870 & 550170 & -0.13\% \\ \hline
         96  & 801134 & 802434 & +0.16\% \\ \hline
@@ -1378,7 +1378,7 @@ do {
 		|>{\centering\arraybackslash}m{3cm}
 		|>{\centering\arraybackslash}m{3cm}|}
         \hline
-        \multirow{2}{3cm}{Число потоков} & \multicolumn{3}{c|}{Количество транзакций в секунду} \\ \cline{2-4}
+        \multirow{2}{*}{Число потоков} & \multicolumn{3}{c|}{Количество транзакций в секунду} \\ \cline{2-4}
         & (None, None) & (All, Lazy) & $\Delta$ \\ \hline
         48  & 21297 & 23034 & +8.16\% \\ \hline
         96  & 23201 & 23291 & +0.39\% \\ \hline
@@ -1392,3 +1392,62 @@ do {
 Согласно рекомендациям разработчиков \texttt{sysbench}, наиболее показательными являются результаты, полученные при количестве рабочих потоков, превышающем число аппаратных потоков выполнения в системе в 2--3 раза. В рассматриваемой конфигурации это соответствует значениям 192 и 288 потоков. Такой выбор обусловлен тем, что рабочие потоки значительную часть времени проводят в ожидании завершения запросов к базе данных, поэтому увеличение их числа позволяет поддерживать более высокую загрузку вычислительных ресурсов системы.
 
 Полученные результаты демонстрируют положительное влияние механизма репликации на производительность сервера базы данных. Наиболее заметный эффект наблюдается при высокой степени параллелизма, когда нагрузка на подсистему управления памятью становится существенным фактором, ограничивающим производительность.
+
+Далее в таблице~\ref{tab:phoronix} представлены результаты прикладных тестов из набора \texttt{Phoronix Test Suite}, запускались они на Kunpeng 920-6426. Для краткости обозначений используется числовая нотация: 0 соответствует политике \texttt{None}, 1~--- \texttt{Minimal} и \texttt{Lazy}, 2~--- \texttt{All}.
+
+\begin{table}[H]
+    \centering
+	\footnotesize
+    \begin{tabular}{
+        |>{\centering\arraybackslash}m{1.5cm}
+        |>{}m{3cm}
+		|>{\centering\arraybackslash}m{0.65cm}|
+		|>{\centering\arraybackslash}m{1.22cm}
+		|>{\centering\arraybackslash}m{1.22cm}
+		|>{\centering\arraybackslash}m{1.22cm}
+		|>{\centering\arraybackslash}m{1.22cm}
+		|>{\centering\arraybackslash}m{1.40cm}
+		|>{\centering\arraybackslash}m{1.22cm}|}
+        \hline
+        Тест & \multicolumn{1}{c|}{Подтест} & * & (0, 0) & (1, 0) & (1, 1) & (2, 0) & (2, 1) & (2, 2) \\ \hline
+        ffte &                  &HIB&42953.1 &43538.76&149733.6&44246.12&150645.6&149175.6 \\ \hline
+        onednn & rnn\_training  &LIB&14875.6 &14691.3 &15474.8 &14744.2 &15942.4 &15930.7 \\ \hline
+        easywave &              &LIB&311948  &317224  &288526  &290046  &283368  &289040 \\ \hline
+		opencv & features2d     &LIB&125115  &123280  &123268  &126769  &128092  &127817 \\ \hline
+		gromacs &               &HIB&3.999   &4.139   &4.511   &4.175   &4.017   & \\ \hline
+		ncnn & shufflenet\_v2   &LIB&19.75   &21.585  &22.365  &21.17   &19.84   &20.245 \\ \hline
+		ncnn&vision\_transformer&LIB&306.69  &286.64  &349.475 &284.71  &360.245 &352.3 \\ \hline
+		ncnn & yolo-fastest     &LIB&14.725  &14.915  &15.075  &27.83   &34.17   &28.605 \\ \hline
+		onednn & ip\_shapes\_1d &LIB&10.37355&10.36845&10.5609 &12.5679 &12.4374 &12.76505 \\ \hline
+    \end{tabular}
+	\\[0.5cm]
+    \begin{tabular}{
+        |>{\centering\arraybackslash}m{1.5cm}
+        |>{}m{3cm}
+		|>{\centering\arraybackslash}m{0.65cm}|
+		|>{\centering\arraybackslash}m{1.22cm}
+		|>{\centering\arraybackslash}m{1.22cm}
+		|>{\centering\arraybackslash}m{1.22cm}
+		|>{\centering\arraybackslash}m{1.22cm}
+		|>{\centering\arraybackslash}m{1.40cm}
+		|>{\centering\arraybackslash}m{1.22cm}|}
+        \hline
+        Тест & \multicolumn{1}{c|}{Подтест} & * & (0, 0) & (1, 0) & (1, 1) & (2, 0) & (2, 1) & (2, 2) \\ \hline
+        ffte &                  &HIB&\multirow{9}{*}{-}& \textcolor{DeltaMid}{1.36\%}& 248.60\%& 3.01\%& \textcolor{DeltaGreen}{250.72\%}& 247.30\%\\ \cline{1-3}\cline{5-9}
+        onednn & rnn\_training  &LIB&& \textcolor{DeltaGreen}{1.24\%} & -4.03\% & 0.88\%  & \textcolor{DeltaRed}{-7.17\%}  & -7.09\% \\ \cline{1-3}\cline{5-9}
+        easywave &              &LIB&& \textcolor{DeltaRed}{-1.69\%}& 7.51\%  & 7.02\%  & \textcolor{DeltaGreen}{9.16\%}   & 7.34\% \\ \cline{1-3}\cline{5-9}
+		opencv & features2d     &LIB&& 1.47\% & \textcolor{DeltaGreen}{1.48\%}  & -1.32\% & \textcolor{DeltaRed}{-2.38\%}  & -2.16\% \\ \cline{1-3}\cline{5-9}
+		gromacs &               &HIB&& 3.50\% & \textcolor{DeltaGreen}{12.80\%} & 4.40\%  & \textcolor{DeltaMid}{0.45\%}   & \\ \cline{1-3}\cline{5-9}
+		ncnn & shufflenet\_v2   &LIB&& -9.29\%& \textcolor{DeltaRed}{-13.24\%}& -7.19\% & \textcolor{DeltaMid}{-0.46\%}  & -2.51\% \\ \cline{1-3}\cline{5-9}
+		ncnn&vision\_transformer&LIB&& 6.54\% & -13.95\%& \textcolor{DeltaGreen}{7.17\%}  & \textcolor{DeltaRed}{-17.46\%} & -14.87\% \\ \cline{1-3}\cline{5-9}
+		ncnn & yolo-fastest     &LIB&& \textcolor{DeltaMid}{-1.29\%}& -2.38\% & -89.00\%& \textcolor{DeltaRed}{-132.05\%}& -94.26\% \\ \cline{1-3}\cline{5-9}
+		onednn & ip\_shapes\_1d &LIB&& \textcolor{DeltaGreen}{0.05\%} & -1.81\% & -21.15\%& -19.90\% & \textcolor{DeltaRed}{-23.05\%} \\ \hline
+		\multicolumn{9}{l}{* Определение результата: LIB = ''lower is better'', HIB = ''higher is better''} \\
+    \end{tabular}
+    \caption{Результаты прикладных тестов от \texttt{Phoronix Test Suite}}
+    \label{tab:phoronix}
+\end{table}
+
+Наблюдается, что на большинстве тестов как минимум одна из конфигураций политик репликации демонстрирует прирост производительности. При этом существенное влияние на результат оказывают как репликация таблиц трансляций, так и репликация данных.
+
+Отдельно следует отметить, что конфигурация \texttt{All} для репликации данных ни разу не оказалась наиболее эффективной среди рассмотренных вариантов. Данный результат является ожидаемым, поскольку полная репликация всех структур приводит к значительным накладным расходам по сравнению с более адаптивной политикой \texttt{Lazy}. Вместе с тем существуют классы приложений, для которых подобный подход может быть оправдан, однако они встречаются достаточно редко.
