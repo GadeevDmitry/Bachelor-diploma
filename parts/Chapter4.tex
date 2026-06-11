@@ -10,6 +10,8 @@
 
 \subsection{Детали реализации механизма в исходном коде}
 
+Большинство листингов, упоминаемых в данном разделе, приведены в \hyperlink{sec:Appendix_hypertarget}{приложении}, чтобы не перегружать основной текст деталями реализации.
+
 \subsubsection{Виртуальный уровень и политики}
 
 Одной из ключевых структур данных подсистемы управления памятью Linux является \texttt{vm\_area\_struct}. Она описывает диапазон пользовательской памяти, содержит информацию о его свойствах и семантике. Практически любая операция управления памятью в ядре начинается с обращения к соответствующему экземпляру \texttt{vm\_area\_struct}.
@@ -35,343 +37,13 @@ struct vm_area_struct {
 
 Для поддержки механизма репликации были добавлены два новых флага, отвечающих за репликацию таблиц трансляций и данных соответственно (см листинг~\ref{lst:vm_replica_flags}). Именно по ним и будет определяться поведение механизма репликации в отношении конкретной области памяти.
 
-\begin{lstlisting}[style=diff]
- /* include/linux/mm.h */
-
- #ifdef CONFIG_ARCH_USES_HIGH_VMA_FLAGS
- #define VM_HIGH_ARCH_BIT_0	32
- ...
- #define VM_HIGH_ARCH_BIT_5	37
-<+>+#define VM_HIGH_ARCH_BIT_6	39</+>
-<+>+#define VM_HIGH_ARCH_BIT_7	40</+>
- #define VM_HIGH_ARCH_0	BIT(VM_HIGH_ARCH_BIT_0)
- ...
- #define VM_HIGH_ARCH_5	BIT(VM_HIGH_ARCH_BIT_5)
-<+>+#define VM_HIGH_ARCH_6	BIT(VM_HIGH_ARCH_BIT_6)</+>
-<+>+#define VM_HIGH_ARCH_7	BIT(VM_HIGH_ARCH_BIT_7)</+>
- #endif /* CONFIG_ARCH_USES_HIGH_VMA_FLAGS */
- ...
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+/* Page tables for this vma should be replicated during page faults */</+>
-<+>+#define VM_REPLICA_INIT	VM_HIGH_ARCH_6</+>
-<+>+/*</+>
-<+>+ * Phys memory of this vma might/should be replicated.</+>
-<+>+ * If this flag is set, VM_REPLICA_INIT also must be set.</+>
-<+>+ */</+>
-<+>+#define VM_REPLICA_COMMIT	VM_HIGH_ARCH_7</+>
-<+>+#endif /* CONFIG_USER_REPLICATION */</+>
-\end{lstlisting}
-\begin{lstlisting}[
-    style=normal,
-    caption={Флаги репликации для виртуальных областей памяти},
-    label={lst:vm_replica_flags}
-]
-/* include/linux/numa_user_replication.h */
-
-#ifdef CONFIG_USER_REPLICATION
-...
-static inline bool numa_is_vma_replicant(struct vm_area_struct *vma) {
-	return vma->vm_flags & VM_REPLICA_INIT;
-}
-
-static inline bool vma_has_replicas(struct vm_area_struct *vma) {
-	return vma->vm_flags & VM_REPLICA_COMMIT;
-}
-...
-#else
-...
-static inline bool numa_is_vma_replicant(struct vm_area_struct *vma) {
-	return 0;
-}
-
-static inline bool vma_has_replicas(struct vm_area_struct *vma) {
-	return 0;
-}
-...
-#endif /* CONFIG_USER_REPLICATION */
-\end{lstlisting}
-
 Однако сами флаги репликации устанавливаются в соответствии с выбранными политиками репликации, на которых основан пользовательский интерфейс механизма (см главу~\ref{sec:Chapter3_user_API}). Политики задаются на уровне виртуального адресного пространства процесса, которое в Linux представляется структурой \texttt{mm\_struct}. Для хранения текущих настроек репликации в неё было добавлено соответствующее поле (см листинг~\ref{lst:mm_struct}).
-
-\begin{lstlisting}[style=diff]
- /* include/linux/mm_types.h */
-
-<+>+enum table_replication_policy_t {</+>
-<+>+	/* no table replication */</+>
-<+>+	TABLE_REPLICATION_NONE = 0,</+>
-<+>+	/* replicate minimal amount to support RO-data replication */</+>
-<+>+	TABLE_REPLICATION_MINIMAL,</+>
-<+>+	/* replicate all tables */</+>
-<+>+	TABLE_REPLICATION_ALL</+>
-<+>+};</+>
-<+>+</+>
-<+>+enum data_replication_policy_t {</+>
-<+>+	/* no data replicas at all */</+>
-<+>+	DATA_REPLICATION_NONE = 0,</+>
-<+>+	/* replicas are created on demand via numa balancer */</+>
-<+>+	DATA_REPLICATION_ON_DEMAND,</+>
-<+>+	/* all ro-data always replicated */</+>
-<+>+	DATA_REPLICATION_ALL</+>
-<+>+};</+>
-<+>+</+>
-<+>+struct numa_replication_policy_t {</+>
-<+>+	enum table_replication_policy_t table_policy:3;</+>
-<+>+	enum data_replication_policy_t data_policy:3;</+>
-<+>+};</+>
-<+>+</+>
- ...
- struct mm_struct {
-     ...
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+    struct numa_replication_policy_t replication_policy;</+>
-<+>+#endif</+>
- };
-\end{lstlisting}
-
-\begin{lstlisting}[
-    style=normal,
-    caption={Политики NUMA-репликации},
-    label={lst:mm_struct}
-]
-/* include/linux/numa_user_replication.h */
-
-#ifdef CONFIG_USER_REPLICATION
-...
-static inline enum table_replication_policy_t
-get_table_replication_policy(struct mm_struct *mm) {
-	return mm->replication_policy.table_policy;
-}
-
-static inline void
-set_table_replication_policy(struct mm_struct *mm,
-	enum table_replication_policy_t table_pol) {
-	mm->replication_policy.table_policy = table_pol;
-}
-
-static inline enum data_replication_policy_t
-get_data_replication_policy(struct mm_struct *mm) {
-	return mm->replication_policy.data_policy;
-}
-
-static inline void
-set_data_replication_policy(struct mm_struct *mm,
-	enum data_replication_policy_t data_pol) {
-	mm->replication_policy.data_policy = data_pol;
-}
-...
-#endif /* CONFIG_USER_REPLICATION */
-\end{lstlisting}
 
 Таким образом, реализована инфраструктура, необходимая для назначения виртуальным областям памяти соответствующих флагов репликации. Установка флагов должна выполняться всякий раз, когда создаётся новая виртуальная область либо изменяются атрибуты уже существующей области, например, при обработке системных вызовов \texttt{mmap} и \texttt{mprotect}. Соответствующие изменения показаны в листинге~\ref{lst:vmflags_modify_replica}.
 
-\begin{lstlisting}[style=normal]
-/* include/linux/numa_user_replication.h */
-
-#ifdef CONFIG_USER_REPLICATION
-...
-/* true if vma with @vm_flags is suitable for data replication */
-static inline bool __vmflags_replica_candidate(vm_flags_t vm_flags) {
-	return (vm_flags & VM_ACCESS_FLAGS) &&
-        !(vm_flags & (VM_WRITE | VM_SHARED));
-}
-
-/* true if vma with @vm_flags is ready for VM_REPLICA_COMMIT flag, i.e.
- * it is suitable for data replication and VM_REPLICA_INIT is already
- * set */
-static inline bool vmflags_might_be_replicated(vm_flags_t vm_flags) {
-	return (vm_flags & VM_REPLICA_INIT) && (vm_flags & VM_ACCESS_FLAGS) &&
-        !(vm_flags & (VM_WRITE | VM_SHARED));
-}
-
-/* set replication flags of @vm_flags according to @mm's policies */
-static inline void vmflags_modify_replica(
-    struct mm_struct *mm, unsigned long *vm_flags) {
-	*vm_flags &= ~(VM_REPLICA_INIT | VM_REPLICA_COMMIT);
-
-	if ((get_table_replication_policy(mm) == TABLE_REPLICATION_ALL) ||
-		(get_table_replication_policy(mm) == TABLE_REPLICATION_MINIMAL &&
-			__vmflags_replica_candidate(*vm_flags))) {
-		*vm_flags |= VM_REPLICA_INIT;
-		if (get_data_replication_policy(mm) != DATA_REPLICATION_NONE &&
-				vmflags_might_be_replicated(*vm_flags))
-			*vm_flags |= VM_REPLICA_COMMIT;
-	}
-}
-...
-#endif /* CONFIG_USER_REPLICATION */
-\end{lstlisting}
-\begin{lstlisting}[
-    style=diff,
-    caption={Установка флагов репликации новым/модифицированным областям},
-    label={lst:vmflags_modify_replica}
-]
- /* mm/mmap.c */
-
- unsigned long do_mmap(struct file *file, unsigned long addr,
-             unsigned long len, unsigned long prot,
- 	         unsigned long flags, vm_flags_t vm_flags,
- 			 unsigned long pgoff, unsigned long *populate,
- 			 struct list_head *uf)
- {
-     struct mm_struct *mm = current->mm;
-     ...
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+    vmflags_modify_replica(mm, &vm_flags);</+>
-<+>+#endif</+>
-     addr = mmap_region(file, addr, len, vm_flags, pgoff, uf);
-     ...
-     return addr;
- }
-
- /* mm/mprotect.c */
-
- static int do_mprotect_pkey(unsigned long start, size_t len,
-         unsigned long prot, int pkey)
- {
-     unsigned long end;
-     struct vm_area_struct *vma;
-     struct vma_iterator vmi;
-     ...
-     for_each_vma_range(vmi, vma, end) {
-         unsigned long mask_off_old_flags, newflags;
-         int new_vma_pkey;
-         ...
-         newflags = calc_vm_prot_bits(prot, new_vma_pkey);
-         newflags |= (vma->vm_flags & ~mask_off_old_flags);
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+        if (vma->vm_mm)</+>
-<+>+            vmflags_modify_replica(vma->vm_mm, &newflags);</+>
-<+>+#endif</+>
-         ...
-     }
-     ...
- }
-\end{lstlisting}
-
 Помимо этого флаги репликации приходится синхронно обновлять существующим областям при изменении процессом политик репликации таблиц трансляций и/или данных. На листинге~\ref{lst:numa_mm_handle_table_replication} показан код для смен политик репликации таблиц с \texttt{All} на \texttt{Minimal} и с \texttt{None} на \texttt{Minimal}. Кроме обновления флагов подходящим виртуальным областям инициируются операции репликации и дерепликации таблиц трансляций. Код для остальных переходов между политиками устроен аналогичным образом и отличается лишь набором областей, состояние которых необходимо изменить.
 
-\begin{lstlisting}[
-    style=normal,
-    caption={Установка флага репликации таблиц трансляций при смене политики},
-    label={lst:numa_mm_handle_table_replication}
-]
-/* mm/numa_user_replication.c */
-
-/* called when table replication policy goes from All to Minimal */
-static void dereplicate_all2min_pgtables(struct mm_struct *mm) {
-	struct vm_area_struct *vma;
-    ...
-	do {
-		unsigned long addr = vma->vm_start;
-		struct vm_area_struct *next;
-        ...
-        /* clear VM_REPLICA_INIT and dereplicate
-         * pgtables for not replica candidate vmas */
-		if (numa_is_vma_replicant(vma) && !vma_might_be_replicated(vma)) {
-			vm_flags_clear(vma, VM_REPLICA_INIT);
-			...
-			dereplicate_pgtables_pgd_range(&tlb, addr, vma->vm_end, ...);
-		}
-		vma = next;
-	} while (vma);
-    ...
-}
-
-static void numa_mm_table_replication_minimal(struct mm_struct *mm) {
-	switch (get_table_replication_policy(mm)) {
-    /* executed when table replication policy goes from None to Minimal */
-	case TABLE_REPLICATION_NONE: {
-		struct vm_area_struct *vma;
-		MA_STATE(mas, &mm->mm_mt, 0, 0);
-
-		mas_for_each(&mas, vma, ULONG_MAX) {
-            /* set VM_REPLICA_INIT and replicate
-             * pgtables for replica candidate vmas */
-			if (vma_replica_candidate(vma)) {
-				vm_flags_set(vma, VM_REPLICA_INIT);
-				replicate_pgtables_vma(vma);
-			}
-		}
-		break;
-	}
-	case TABLE_REPLICATION_MINIMAL:
-		return;
-	case TABLE_REPLICATION_ALL:
-		dereplicate_all2min_pgtables(mm);
-		break;
-	}
-
-	set_table_replication_policy(mm, TABLE_REPLICATION_MINIMAL);
-}
-\end{lstlisting}
-
 Аналогичным образом реализовано изменение политики репликации данных. На листинге~\ref{lst:numa_mm_handle_data_replication} показаны переходы с \texttt{Lazy}/\texttt{All} на \texttt{None} и с \texttt{Lazy/None} на \texttt{All}. Вместе со сменой флагов выполняется репликация и дерепликация соответствующих физических страниц. Однако следует отметить, что при переходе с \texttt{None} на \texttt{Lazy} выполняется только обновление флагов, репликация данных осуществляется отложено при обработках \textit{NUMA hinting faults} (см главу~\ref{sec:Chapter3_data_repl_policies}).
-
-\begin{lstlisting}[
-    style=normal,
-    caption={Установка флага репликации данных при смене политики},
-    label={lst:numa_mm_handle_data_replication}
-]
-/* mm/numa_user_replication.c */
-
-static bool numa_mm_data_replication_none(struct mm_struct *mm) {
-	switch (get_data_replication_policy(mm)) {
-	case DATA_REPLICATION_NONE:
-		return true;
-    /* executed when data replication policy
-     * goes from Lazy/All to None */
-	case DATA_REPLICATION_ON_DEMAND:
-	case DATA_REPLICATION_ALL: {
-		struct vm_area_struct *vma;
-		MA_STATE(mas, &mm->mm_mt, 0, 0);
-
-		mas_for_each(&mas, vma, ULONG_MAX) {
-            /* deduplicate data and clear VM_REPLICA_COMMIT
-             * for all has_replicas vmas */
-			if (vma_has_replicas(vma)) {
-				vma_start_write(vma);
-				if (phys_deduplicate(vma,
-						vma->vm_start, vma->vm_end - vma->vm_start))
-					return false;
-				__vm_flags_mod(vma, VM_NONE, VM_REPLICA_COMMIT);
-			}
-		}
-		break;
-	}
-	}
-
-	set_data_replication_policy(mm, DATA_REPLICATION_NONE);
-	return true;
-}
-
-static bool numa_mm_data_replication_all(struct mm_struct *mm) {
-	switch (get_data_replication_policy(mm)) {
-    /* executed when data replication policy
-     * goes from Lazy/None to All */
-	case DATA_REPLICATION_NONE:
-	case DATA_REPLICATION_ON_DEMAND: {
-		struct vm_area_struct *vma;
-		MA_STATE(mas, &mm->mm_mt, 0, 0);
-
-		mas_for_each(&mas, vma, ULONG_MAX) {
-            /* set VM_REPLICA_COMMIT and duplicate data
-             * for all replica candidate vmas */
-			if (vma_might_be_replicated(vma))
-				vm_flags_set(vma, VM_REPLICA_COMMIT);
-			if (vma_has_replicas(vma))
-				phys_duplicate(vma,
-                    vma->vm_start, vma->vm_end - vma->vm_start);
-		}
-		break;
-	}
-	case DATA_REPLICATION_ALL:
-		return true;
-	}
-
-	set_data_replication_policy(mm, DATA_REPLICATION_ALL);
-	return true;
-}
-\end{lstlisting}
 
 \subsubsection{Физический уровень}
 \label{sec:Chapter4_phys_layer}
@@ -395,47 +67,6 @@ struct page {
 
 Для обозначения реплицированности физической страницы был добавлен флаг \texttt{PG\_replicated} (см листинг~\ref{lst:PG_replicated}). Он выставляется у всех реплицированных страниц~--- как у страниц с пользовательскими данными, так и у страниц с таблицами трансляций.
 
-\begin{lstlisting}[
-	style=diff,
-	caption={Флаг для реплицированных физических страниц},
-	label={lst:PG_replicated}
-]
- /* include/linux/page-flags.h */
-
- enum pageflags {
-	 PG_locked,
-	 ...
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+	 PG_replicated,</+>
-<+>+#endif</+>
- 	 __NR_PAGEFLAGS,
-	 ...
- };
- ...
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+PAGEFLAG(Replicated, replicated, PF_ANY)</+>
-<+>+#else</+>
-<+>+PAGEFLAG_FALSE(Replicated, replicated)</+>
-<+>+#endif</+>
- ...
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+#define __PG_REPLICATED		(1UL << PG_replicated)</+>
-<+>+#else</+>
-<+>+#define __PG_REPLICATED		0</+>
-<+>+#endif</+>
-<+>+</+>
- /*
-  * Flags checked when a page is freed.  Pages being freed should not have
-  * these flags set.  If they are, there is a problem.
-  */
- #define PAGE_FLAGS_CHECK_AT_FREE					\
- 	 1UL << PG_private    | 1UL << PG_private_2 |	\
- 	 1UL << PG_writeback  | 1UL << PG_reserved  |	\
- 	 1UL << PG_slab       | 1UL << PG_active    |	\
-<->-	 1UL << PG_unevictable| __PG_MLOCKED | LRU_GEN_MASK)</->
-<+>+	 1UL << PG_unevictable| __PG_REPLICATED | __PG_MLOCKED | LRU_GEN_MASK)</+>
-\end{lstlisting}
-
 Такое архитектурное решение накладывает небольшое ограничение на репликацию данных, которые могут разделяться между несколькими процессами. Необходимо исключать ситуации, когда одна и та же страница с данными реплицирована в контексте одного процесса и не реплицирована в контексте другого (см рис.~\ref{fig:data_repl_err}), поскольку значение флага \texttt{PG\_replicated} является общим для страницы. Именно поэтому при репликации и дерепликации данных исходная страница никогда не переиспользуется в качестве страницы-реплики (см главу~\ref{sec:Chapter3_data_repl}), а страница-реплика~--- в качестве оригинальной страницы (см главу~\ref{sec:Chapter3_data_table_derepl}).
 
 \begin{figure}[ht]
@@ -449,185 +80,9 @@ struct page {
 
 Для указателя на \textit{мастер}-таблицу добавлено специальное поле в \texttt{ptdesc}-дескрипторе~--- структуре-алиасе \texttt{page}-дескриптора, содержащей поля специально для таблиц трансляций (см листинг~\ref{lst:master_table}). Новое поле добавлено в одно из существующих объединений, поэтому размер структуры остаётся неизменным, а с другими полями объединения оно не конфликтует, т.к. они используются только в архитектурах x86 и PowerPC, не в arm64. Первоначально каждая таблица является сама себе \textit{мастер}-таблицей, однако в процессе репликации соответствующие указатели обновляются.
 
-\begin{lstlisting}[
-	style=diff,
-	caption={Использование блокировки \textit{мастер}-таблицы},
-	label={lst:master_table}
-]
- /* include/linux/mm_types.h */
-
- struct ptdesc {
-	 ...
-	 union {
-		 struct mm_struct *pt_mm; /* Used for x86 pgds. */
-		 atomic_t pt_frag_refcount; /* Powerpc only. */
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+		 struct ptdesc *master_table;</+>
-<+>+#endif</+>
-	 };
-
-	 union {
- #if ALLOC_SPLIT_PTLOCKS
-		 spinlock_t *ptl;
- #else
-		 spinlock_t ptl;
- #endif
-	 };
-	 ...
- };
-
- /* include/linux/mm.h */
-
- #if USE_SPLIT_PTE_PTLOCKS
- #if ALLOC_SPLIT_PTLOCKS
- ...
- bool ptlock_alloc(struct ptdesc *ptdesc);
- void ptlock_free(struct ptdesc *ptdesc);
-
- static inline spinlock_t *ptlock_ptr(struct ptdesc *ptdesc) {
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+	 return ptdesc->master_table->ptl;</+>
-<+>+#else</+>
-	 return ptdesc->ptl;
-<+>+#endif</+>
- }
- #else /* ALLOC_SPLIT_PTLOCKS */
- ...
- static inline bool ptlock_alloc(struct ptdesc *ptdesc) {
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+	 ptdesc->master_table = ptdesc;</+>
-<+>+#endif</+>
-	 return true;
- }
-
- static inline void ptlock_free(struct ptdesc *ptdesc) {
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+	 ptdesc->master_table = NULL;</+>
-<+>+#endif</+>
- }
-
- static inline spinlock_t *ptlock_ptr(struct ptdesc *ptdesc) {
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+	 return &ptdesc->master_table->ptl;</+>
-<+>+#else</+>
-	 return &ptdesc->ptl;
-<+>+#endif</+>
- }
- #endif /* ALLOC_SPLIT_PTLOCKS */
- ...
- #endif /* USE_SPLIT_PTE_PTLOCKS */
-\end{lstlisting}
-
 Следующая вспомогательная сущность тоже касается реплицированных таблиц трансляций. Для согласованного изменения всех таблиц-реплик необходимо иметь возможность последовательно обходить их. Для этого они объединяются в циклический односвязный список с помощью нового поля в \texttt{ptdesc}-дескрипторе (см листинг~\ref{lst:replica_list}). Размер структуры всё также остаётся неизменным, потому что новое поле добавлено в объединение с уже существующим. И конфликтов с ним также не возникнет, поскольку существующее поле является алиасом одноимённого поля структуры \texttt{page}, не используемого для таблиц трансляций. В процессе репликации таблицы-реплики соединяются в список, после чего его обход может выполняться с помощью макросов \texttt{for\_each\_pgtable} и \texttt{for\_each\_pgtable\_replica} (см листинг~\ref{lst:replica_list}).
 
-\begin{lstlisting}[style=diff]
- /* include/linux/llist.h */
-
- struct llist_head {
-	 struct llist_node *first;
- };
- 
- struct llist_node {
-	 struct llist_node *next;
- };
-
- /* include/linux/mm_types.h */
-
- struct ptdesc {
-	 ...
-<->-	 unsigned long __page_mapping; /* Unused for page tables. */</->
-<+>+	 union {</+>
-<+>+		 unsigned long __page_mapping; /* Unused for page tables. */</+>
-<+>+		 struct llist_head replica_list_head;</+>
-<+>+		 struct llist_node replica_list_node;</+>
-<+>+	 };</+>
-	 ...
- };
-\end{lstlisting}
-\begin{lstlisting}[
-	style=normal,
-	caption={Циклический односвязный список таблиц-реплик},
-	label={lst:replica_list}
-]
-/* include/linux/numa_user_replication.h */
-
-#ifdef CONFIG_USER_REPLICATION
-...
-/**
- * @pos:	struct ptdesc* of current replica
- * @table:	current table entry to write (virtual address)
- * @head_table:	table entry to start with, will be a part of this loop
- * @nid:	node id of current pgtable
- * @offset:	offset of current table entry in table page in bytes
- * @start:	boolean value for tmp storage
- */
-#define for_each_pgtable(pos, table, head_table, nid, offset, start)	\
-	for (pos = llist_entry(									\
-			&virt_to_ptdesc(head_table)->replica_list_node,	\
-		typeof(*pos), replica_list_node),					\
-	    start = true, nid = page_to_nid(ptdesc_page(pos)),	\
-	    offset = offset_in_table(head_table),				\
-		table = (typeof(table))get_table_ptr(pos, offset);	\
-	    pos != virt_to_ptdesc(head_table) || start;			\
-	    pos = llist_entry((pos)->replica_list_node.next,	\
-			typeof(*pos), replica_list_node),				\
-	    table = (typeof(table))get_table_ptr(pos, offset),	\
-	    nid = page_to_nid(ptdesc_page(pos)), start = false)
-
-/**
- * @pos:	struct ptdesc* of current replica
- * @table:	current table entry to write (virtual address)
- * @head_table:	table entry to start with, will not be a part of this loop
- * @offset:	offset of current table entry in table page in bytes
- */
-#define for_each_pgtable_replica(pos, table, head_table, offset)	\
-	for (pos = llist_entry(										\
-			virt_to_ptdesc(head_table)->replica_list_node.next,	\
-		typeof(*pos), replica_list_node),					\
-	    offset = offset_in_table(head_table),				\
-		table = (typeof(table))get_table_ptr(pos, offset);	\
-	    pos != virt_to_ptdesc(head_table);					\
-	    pos = llist_entry((pos)->replica_list_node.next,	\
-			typeof(*pos), replica_list_node),				\
-	    table = (typeof(table))get_table_ptr(pos, offset))
-...
-#endif /* CONFIG_USER_REPLICATION */
-\end{lstlisting}
-
 Последнее, о чём в данной главе стоит сказать~--- это корень иерархии таблиц трансляций, PGD-уровень. В отсутствии репликации он состоит из единственной PGD-таблицы, указатель на которую хранится в специальном поле \texttt{pgd} структуры \texttt{mm\_struct}. Но при использовании механизма репликации для каждой NUMA-ноды создаётся собственная PGD-таблица. Такие таблицы аллоцируются при инициализации нового экземпляра \texttt{mm\_struct}, а указатели на них сохраняются в специальном массиве, доступном через новое поле данной структуры (см листинг~\ref{lst:pgd_numa}).
-
-\begin{lstlisting}[style=diff]
- /* include/linux/mm_types.h */
-
- struct mm_struct {
-	 struct {
-		 ...
-		 pgd_t *pgd;
-		 ...
-	 };
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+	 pgd_t **pgd_numa;</+>
-<+>+#endif</+>
-	 ...
- };
-\end{lstlisting}
-\begin{lstlisting}[
-	style=normal,
-	caption={Указатели на реплицированные PGD-таблицы доступны через \texttt{mm\_struct}},
-	label={lst:pgd_numa}
-]
-/* include/linux/numa_user_replication.h */
-
-#ifdef CONFIG_USER_REPLICATION
-...
-#define this_node_pgd(mm) ((mm)->pgd_numa[numa_node_id()])
-...
-#else
-...
-#define this_node_pgd(mm) ((mm)->pgd)
-...
-#endif /* CONFIG_USER_REPLICATION */
-\end{lstlisting}
 
 \subsubsection{Репликация таблиц трансляций}
 
@@ -639,120 +94,9 @@ struct page {
 
 Репликация таблиц целиком и полностью происходит на первом этапе. Для этого стандартные функции спуска по иерархии таблиц трансляций были заменены модифицированными версиями, которые помимо выделения отсутствующих таблиц выполняют их репликацию при необходимости (см листинг~\ref{lst:handle_mm_fault}).
 
-\begin{lstlisting}[
-	style=diff,
-	caption={Спуск в иерархии таблиц трансляций в процессе обработки ошибки страниц},
-	label={lst:handle_mm_fault}
-]
- /* mm/memory.c */
-
- static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
-	 unsigned long address, unsigned int flags)
- {
-	 struct vm_fault vmf = {...};
-	 struct mm_struct *mm = vma->vm_mm;
-	 pgd_t *pgd;
-	 p4d_t *p4d;
-	 ...
-<->-	 pgd = pgd_offset(mm, address);</->
-<->-	 p4d = p4d_alloc(mm, pgd, address);</->
-<+>+	 pgd = fault_pgd_offset(&vmf, address);</+>
-<+>+	 p4d = fault_p4d_alloc(&vmf, mm, pgd, address);</+>
-	 ...
-<->-	 vmf.pud = pud_alloc(mm, p4d, address);</->
-<+>+	 vmf.pud = fault_pud_alloc(&vmf, mm, p4d, address);</+>
-	 ...
-<->-	 vmf.pmd = pmd_alloc(mm, vmf.pud, address);</->
-<+>+	 vmf.pmd = fault_pmd_alloc(&vmf, mm, vmf.pud, address);</+>
-	 ...
-<+>+	 if (fault_pte_alloc(&vmf))</+>
-<+>+		 return VM_FAULT_OOM;</+>
-	 return handle_pte_fault(&vmf);
- }
-\end{lstlisting}
-
 Реализация этих функций приведена в листинге~\ref{lst:fault_pxx_alloc}. Все они имеют одинаковую структуру. Сначала функции семейства \texttt{replication\_path\_p*d} определяют необходимость репликации соответствующего уровня таблиц трансляции. Решение принимается на основе флагов виртуальной области памяти, содержащей обрабатываемый адрес, а также текущего состояния данного уровня таблиц, в частности факта его существования и реплицированности. Затем функции семейства \texttt{replication\_handle\_p**\_fault} выполняют непосредственно репликацию, если она требуется.
 
 Если же репликация не требуется, или она вовсе выключена, выполняются стандартные функции семейства \texttt{p*d\_alloc}, используемые в немодифицированном Linux.
-
-\begin{lstlisting}[
-	style=normal,
-	caption={Модифицированные функции для спуска, аллокации и репликации таблиц трансляций},
-	label={lst:fault_pxx_alloc}
-]
-/* include/linux/numa_user_replication.h */
-
-#ifdef CONFIG_USER_REPLICATION
-...
-pgd_t *fault_pgd_offset(struct vm_fault *vmf, unsigned long address) {
-	vmf->pgd = pgd_offset_pgd(this_node_pgd(vmf->vma->vm_mm), address);
-	return vmf->pgd;
-}
-
-p4d_t *fault_p4d_alloc(struct vm_fault *vmf, struct mm_struct *mm,
-	pgd_t *pgd, unsigned long address) {
-	if (replication_path_pgd(vmf)) {
-		if (replication_handle_p4d_fault(vmf))
-			return NULL;
-	} else
-		vmf->p4d = p4d_alloc(mm, pgd, address);
-	return vmf->p4d;
-}
-
-pud_t *fault_pud_alloc(struct vm_fault *vmf, struct mm_struct *mm,
-	p4d_t *p4d, unsigned long address) {
-	if (replication_path_p4d(vmf)) {
-		if (replication_handle_pud_fault(vmf))
-			return NULL;
-	} else
-		vmf->pud = pud_alloc(mm, p4d, address);
-	return vmf->pud;
-}
-
-pmd_t *fault_pmd_alloc(struct vm_fault *vmf, struct mm_struct *mm,
-	pud_t *pud, unsigned long address) {
-	if (replication_path_pud(vmf)) {
-		if (replication_handle_pmd_fault(vmf))
-			return NULL;
-	} else
-		vmf->pmd = pmd_alloc(mm, pud, address);
-	return vmf->pmd;
-}
-
-int fault_pte_alloc(struct vm_fault *vmf) {
-	if (replication_path_pmd(vmf))
-		return replication_handle_pte_fault(vmf);
-	return 0;
-}
-...
-#else
-...
-static inline pgd_t *fault_pgd_offset(struct vm_fault *vmf,
-	unsigned long address) {
-	return pgd_offset(vmf->vma->vm_mm, address);
-}
-
-static inline p4d_t *fault_p4d_alloc(struct vm_fault *vmf,
-	struct mm_struct *mm, pgd_t *pgd, unsigned long address) {
-	return p4d_alloc(mm, pgd, address);
-}
-
-static inline pud_t *fault_pud_alloc(struct vm_fault *vmf,
-	struct mm_struct *mm, p4d_t *p4d, unsigned long address) {
-	return pud_alloc(mm, p4d, address);
-}
-
-static inline pmd_t *fault_pmd_alloc(struct vm_fault *vmf,
-	struct mm_struct *mm, pud_t *pud, unsigned long address) {
-	return pmd_alloc(mm, pud, address);
-}
-
-static inline int fault_pte_alloc(struct vm_fault *vmf) {
-	return 0;
-}
-...
-#endif /* CONFIG_USER_REPLICATION */
-\end{lstlisting}
 
 На листинге~\ref{lst:replication_handle_pte_fault} приведён код функции \texttt{replication\_handle\_pte\_fault}, выполняющей репликацию PTE-таблиц. Возможны два варианта развития событий, различающиеся исходным состоянием PTE-уровня.
 \begin{enumerate}
@@ -781,88 +125,6 @@ static inline int fault_pte_alloc(struct vm_fault *vmf) {
 		\item Встроить оставшиеся таблицы в иерархию.
 	\end{enumerate}
 \end{enumerate}
-
-\begin{lstlisting}[
-	style=normal,
-	caption={Репликация PTE-таблиц},
-	label={lst:replication_handle_pte_fault}
-]
-/* mm/numa_user_replication.c */
-
-static vm_fault_t replication_handle_pte_fault(struct vm_fault *vmf)
-{
-	int ret;
-	struct mm_struct *mm = vmf->vma->vm_mm;
-	struct ptdesc *pte_tables[MAX_NUMNODES];
-	spinlock_t *ptl;
-
-	/* true if PTE-level is absent or replicated */
-	if (replicated_pte_level(vmf)) {
-		if (!pmd_none(*vmf->pmd))
-			/* PTE-level is not absent, therefore it is replicated.
-			 * Nothing need to do, returning. */
-			return 0;
-
-		/* PTE-level is absent, we need to create and replicate it */
-
-		/* Allocate and prepare replicated PTE-tables.
-		 * Preparation involves:
-		 * 1. setting PG_replicated flag;
-		 * 2. setting master-table for tables-replicas;
-		 * 3. connecting tables into cyclic linked list.
-		 */
-		ret = prepare_replicated_pte_tables(NUMA_NO_NODE, pte_tables, mm);
-		if (ret)
-			return VM_FAULT_OOM;
-		/* acquire PMD-lock before modifying parent PMD-tables */
-		ptl = pmd_lock(mm, vmf->pmd);
-		if (unlikely(pmd_present(*vmf->pmd))) {
-			/* Someone else has already replicated this level.
-			 * Nothing else need to do, releasing and returning. */
-			spin_unlock(ptl);
-			release_replicated_pte_tables(NUMA_NO_NODE, pte_tables, mm);
-		} else {
-			/* Populate PMD-entries to point to replicated PTE-tables. */
-			sync_replicated_pte_tables(NUMA_NO_NODE, pte_tables,
-				vmf->pmd, mm);
-			spin_unlock(ptl);
-		}
-	} else {
-		/* the only PTE-table exists, we need to replicate it */
-
-		struct page *table_page = pmd_pgtable(*(vmf->pmd));
-		int pte_node = page_to_nid(table_page);
-
-		pte_tables[pte_node] = page_ptdesc(table_page);
-		/* Allocate remaining PTE-tables. */
-		ret = prepare_replicated_pte_tables(pte_node, pte_tables, mm);
-		if (ret)
-			return VM_FAULT_OOM;
-		/* acquire PMD-lock before modifying parent PMD-tables */
-		ptl = pmd_lock(mm, vmf->pmd);
-		if (unlikely(PageReplicated(table_page))) {
-			/* Someone else has already replicated this level.
-			 * Nothing else need to do, releasing and returning. */
-			spin_unlock(ptl);
-			release_replicated_pte_tables(pte_node, pte_tables, mm);
-		} else {
-			/* Acquire PTE-lock of existing PTE-table.
-			 * Prepare replicated PTE-tables, it involves:
-			 * 1. setting PG_replicated flag;
-			 * 2. setting master-table to point on existing PTE-table;
-			 * 3. connecting tables into cyclic linked list;
-			 * 4. copy the contents of existing PTE-table to others.
-			 * Populate PMD-entries to point to replicated PTE-tables.
-			 */
-			sync_replicated_pte_tables(pte_node, pte_tables,
-				vmf->pmd, mm);
-			spin_unlock(ptl);
-		}
-	}
-
-	return 0;
-}
-\end{lstlisting}
 
 Реализация остальных функций семейства \texttt{replication\_handle\_p**\_fault} построена аналогичным образом и отличается лишь оперируемым уровнем иерархии таблиц трансляций.
 
@@ -899,62 +161,6 @@ int numa_replicate_page(struct vm_fault *vmf)
 
 Код, реализующий первые два случая, приведён в листинге~\ref{lst:data_replication_all}. Третий случай был рассмотрен ранее в листинге~\ref{lst:numa_mm_handle_data_replication}.
 
-\begin{lstlisting}[
-	style=diff,
-	caption={Репликация данных при установленной политике \texttt{All}},
-	label={lst:data_replication_all}
-]
- /* mm/memory.c */
-
- static vm_fault_t do_pte_missing(struct vm_fault *vmf)
- {
-<+>+	 vm_fault_t ret;</+>
-	 ...
-	 if (vma_is_anonymous(vmf->vma))
-<->-		 return do_anonymous_page(vmf);</->
-<+>+		 ret = do_anonymous_page(vmf);</+>
-	 else
-<->-		 return do_fault(vmf);</->
-<+>+		 ret = do_fault(vmf);</+>
-<+>+</+>
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+	 if (get_data_replication_policy(vmf->vma->vm_mm) ==</+>
-<+>+		 DATA_REPLICATION_ALL) {</+>
-<+>+		 if (vma_has_replicas(vmf->vma))</+>
-<+>+			 numa_replicate_page(vmf);</+>
-<+>+	 }</+>
-<+>+#endif</+>
-<+>+	 return ret;</+>
- }
-
- /* mm/mprotect.c */
-
- int mprotect_fixup(struct vma_iterator *vmi, struct mmu_gather *tlb,
-	 struct vm_area_struct *vma, struct vm_area_struct **pprev,
-	 unsigned long start, unsigned long end, unsigned long newflags)
- {
-	 struct mm_struct *mm = vma->vm_mm;
-	 unsigned int mm_cp_flags = 0;
-	 ...
-	 vm_flags_reset(vma, newflags);
-	 if (vma_wants_manual_pte_write_upgrade(vma))
-		 mm_cp_flags |= MM_CP_TRY_CHANGE_WRITABLE;
-	 vma_set_page_prot(vma);
-
-	 change_protection(tlb, vma, start, end, mm_cp_flags);
-
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+	 if (get_data_replication_policy(mm) == DATA_REPLICATION_ALL) {</+>
-<+>+		 if (vma_has_replicas(vma)) {</+>
-<+>+			 replicate_pgtables_vma(vma);</+>
-<+>+			 phys_duplicate(vma, start, end - start);</+>
-<+>+		 }</+>
-<+>+	 }</+>
-<+>+#endif</+>
-	 ...
- }
-\end{lstlisting}
-
 В случае политики \texttt{Lazy} механизм репликации реализуется поверх существующего NUMA-балансировщика. Для этого модифицируются как фаза сканирования памяти, так и обработчик \textit{NUMA hinting faults}.
 
 Фаза сканирования состоит из двух этапов:
@@ -968,128 +174,9 @@ int numa_replicate_page(struct vm_fault *vmf)
 	Единственное изменение на данном этапе заключается в пропуске уже реплицированных страниц, поскольку их появление в обработчике \textit{NUMA hinting faults} не имеет смысла (см. функцию \texttt{change\_pte\_range} в листинге~\ref{lst:NUMA_balancer}).
 \end{enumerate}
 
-\begin{lstlisting}[
-	style=diff,
-	caption={Модифицированная фаза сканирования NUMA-балансировщика},
-	label={lst:NUMA_balancer}
-]
- /* kernel/sched/fair.c */
-
- static void task_numa_work(struct callback_head *work)
- {
-	 struct vm_area_struct *vma;
-	 struct vma_iterator vmi;
-	 ...
-	 for (; vma; vma = vma_next(&vmi)) {
-<->-		 if (!vma_migratable(vma) || !vma_policy_mof(vma) ||</->
-<+>+		 if (!vma_migratable(vma) || (!vma_policy_mof(vma) &&</+>
-<+>+			 !vma_has_replicas(vma)) ||</+>
-			 is_vm_hugetlb_page(vma) || (vma->vm_flags & VM_MIXEDMAP))
-			 continue;
-
-		 /* Avoid hinting faults in read-only file-backed mappings
-		  * as migrating the pages will be of marginal benefit. */
-<+>+</+>
-<+>+		 /* Do not avoid hinting faults in read-only file-backed mappings</+>
-<+>+		  * as replicating the pages should be of significant benefit. */</+>
-<->-		 if (!vma->vm_mm || (vma->vm_file &&</->
-<->-			 (vma->vm_flags & (VM_READ|VM_WRITE)) == (VM_READ)))</->
-<+>+		 if ((!vma->vm_mm || (vma->vm_file &&</+>
-<+>+			 (vma->vm_flags & (VM_READ|VM_WRITE)) == (VM_READ))) &&</+>
-<+>+			 !vma_has_replicas(vma))</+>
-			 continue;
-		 ...
-	 }
-	 ...
- }
-
- /* mm/mprotect.c */
-
- static long change_pte_range(struct mmu_gather *tlb,
-	 struct vm_area_struct *vma, pmd_t *pmd, unsigned long addr,
-	 unsigned long end, pgprot_t newprot, unsigned long cp_flags)
- {
-	 pte_t *pte, oldpte;
-	 bool prot_numa = cp_flags & MM_CP_PROT_NUMA;
-	 long pages = 0;
-	 ...
-	 do {
-		 oldpte = ptep_get(pte);
-		 if (pte_present(oldpte)) {
-			 ...
-			 if (prot_numa) {
-				 struct page *page;
-				 ...
-<+>+				 /* skip already replicated memory */</+>
-<+>+				 if (PageReplicated(page))</+>
-<+>+				 	 return pages;</+>
-				 ...
-			 }
-			 ...
-		 }
-	 } while (pte++, addr += PAGE_SIZE, addr != end);
-	 ...
-	 return pages;
- }
-\end{lstlisting}
-
 Последнее изменение относится непосредственно к обработчику \textit{NUMA hinting faults}. Для виртуальных областей памяти, помеченных как реплицируемые, вместо миграции страницы выполняется её репликация (см. листинг~\ref{lst:do_numa_page}).
 
 Следует отметить, что при неудачной попытке репликации система может вернуться к стандартному механизму миграции страниц. Однако это возможно только для тех виртуальных областей памяти, которые удовлетворяют критериям миграции из функции \texttt{task\_numa\_work}, которые были частично ослаблены для поддержки механизма репликации.
-
-\begin{lstlisting}[
-	style=diff,
-	caption={Модифицированный обработчик \textit{NUMA hinting faults}},
-	label={lst:do_numa_page}
-]
- static vm_fault_t do_numa_page(struct vm_fault *vmf)
- {
-	 struct vm_area_struct *vma = vmf->vma;
-	 struct page *page = NULL;
-	 int page_nid = NUMA_NO_NODE, target_nid;
-	 ...
-	 target_nid = numa_migrate_prep(
-		 page, vma, vmf->address, page_nid, &flags);
-<->-	 if (target_nid == NUMA_NO_NODE) {</->
-<+>+	 if (target_nid == NUMA_NO_NODE && !vma_has_replicas(vma)) {</+>
-		 put_page(page);
-		 goto out_map;
-	 }
-	 ...
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+	 if (vma_has_replicas(vma)) {</+>
-<+>+		 /* drop the reference count that was</+>
-<+>+		  * elevated in numa_migrate_prep() */</+>
-<+>+		 put_page(folio);</+>
-<+>+</+>
-<+>+		 if (numa_replicate_page(vmf)) {</+>
-<+>+			 /* replication success */</+>
-<+>+			 ...</+>
-<+>+			 return 0;</+>
-<+>+		 }</+>
-<+>+		 /* replication failed */</+>
-<+>+</+>
-<+>+		 /* forbid migration if the condition from</+>
-<+>+		  * kernel/sched/fair.c:task_numa_work()</+>
-<+>+		  * is not satisfied */</+>
-<+>+		 if (vma->vm_file &&</+>
-<+>+			 ((vma->vm_flags & (VM_READ|VM_WRITE)) == VM_READ)) {</+>
-<+>+			 ...</+>
-<+>+			 goto out_map;</+>
-<+>+		 }</+>
-<+>+</+>
-<+>+		 /* forbid migration if the condition from</+>
-<+>+		  * beginning of the function is not satisfied */</+>
-<+>+		 if (target_nid == NUMA_NO_NODE) {</+>
-<+>+			 ...</+>
-<+>+			 goto out_map;</+>
-<+>+		 }</+>
-<+>+	 }</+>
-<+>+	 /* fallback to migration */</+>
-<+>+#endif</+>
-	 ...
- }
-\end{lstlisting}
 
 \subsubsection{Дерепликация таблиц трансляций и данных}
 
@@ -1104,53 +191,6 @@ int numa_replicate_page(struct vm_fault *vmf)
 \end{enumerate}
 
 Дополнительных сложностей, связанных с синхронизацией, в данном случае не возникает, поскольку дерепликация выполняется во время изменения политики репликации таблиц трансляций, которое происходит при эксклюзивном захвате адресного пространства процесса.
-
-\begin{lstlisting}[
-	style=normal,
-	caption={Дерепликация PTE-таблиц},
-	label={lst:dereplicate_pgtables_pte_range}
-]
-/* mm/numa_user_replication.c */
-
-static void dereplicate_pgtables_pte_range(struct mmu_gather *tlb,
-	pmd_t *pmd, unsigned long addr) {
-	unsigned long offset;
-	struct ptdesc *curr, *tmp;
-	pmd_t *curr_pmd;
-	pte_t *curr_pte;
-	spinlock_t *lock;
-	/* master-table is the only one that will remain */
-	pgtable_t ptetable = ptdesc_page(
-		page_ptdesc(pmd_page(*pmd))->master_table);
-
-	/* nothing need to do if PTE table is not replicated */
-	if (!numa_pgtable_replicated(page_to_virt(ptetable)))
-		return;
-
-	/* Populate PMD-entries to point to the master-table.*/
-
-	lock = pmd_lock(tlb->mm, pmd); /* probably unnecessary */
-	pmd_populate(tlb->mm, pmd, ptetable);
-	for_each_pgtable_replica(curr, curr_pmd, pmd, offset)
-		pmd_populate(tlb->mm, curr_pmd, ptetable);
-	spin_unlock(lock);
-
-	/* Release unneeded tables. */
-	for_each_pgtable_replica(curr, tmp, curr_pte,
-		page_to_virt(ptetable), offset) {
-		/* destroy the cyclic linked list */
-		cleanup_pte_list(ptdesc_page(curr));
-		/* release the table (PG_replicated flag unsetting here) */
-		pte_free_tlb(tlb, ptdesc_page(curr), addr);
-		mm_dec_nr_ptes(tlb->mm);
-	}
-
-	/* destroy the cyclic linked list and
-	 * unset PG_replicated flag for master-table */
-	cleanup_pte_list(ptetable);
-	ClearPageReplicated(ptetable);
-}
-\end{lstlisting}
 
 Что касается дерепликации данных, то её принцип работы подробно рассмотрен в главе~\ref{sec:Chapter3_data_table_derepl}. Приводить здесь реализацию функции нецелесообразно, поскольку она содержит главным образом технические детали и не включает новых архитектурных решений. Поэтому в листинге~\ref{lst:phys_deduplicate} представлен только интерфейс, состоящий из единственной функции \texttt{phys\_deduplicate}.
 
@@ -1177,38 +217,6 @@ int phys_deduplicate(struct vm_area_struct *vma,
 	Здесь следует обратить внимание на эксклюзивный захват \texttt{vma}-блокировки перед выполнением дерепликации данных. Если захватывать её только перед изменением флагов области памяти, то между завершением дерепликации и установкой новых флагов конкурентный поток может повторно выполнить репликацию данных. В результате состояние области памяти станет неконсистентным.
 \end{enumerate}
 
-\begin{lstlisting}[
-	style=diff,
-	caption={Дерепликация данных},
-	label={lst:data_derepl}
-]
- /* mm/mprotect.c */
-
- int
- mprotect_fixup(struct vma_iterator *vmi, struct mmu_gather *tlb,
-	 struct vm_area_struct *vma, struct vm_area_struct **pprev,
-	 unsigned long start, unsigned long end, unsigned long newflags)
- {
-	...
-<+>+#ifdef CONFIG_USER_REPLICATION</+>
-<+>+	 if (!(newflags & VM_REPLICA_COMMIT) && vma_has_replicas(vma)) {</+>
-<+>+		 /* We should take vma write lock before phys_deduplicate()</+>
-<+>+		  * to prevent concurents to phys_duplicate() the vma's</+>
-<+>+		  * range again using vma read lock.</+>
-<+>+		  */</+>
-<+>+		 vma_start_write(vma);</+>
-<+>+		 error = phys_deduplicate(vma, start, end - start);</+>
-<+>+		 if (error)</+>
-<+>+			 goto fail;</+>
-<+>+	 }</+>
-<+>+#endif</+>
-	 ...
-	 vma_start_write(vma);
-	 vm_flags_reset(vma, newflags);
-	 ...
- }
-\end{lstlisting}
-
 \subsubsection{Итого}
 
 Итоговая статистика патчсета с реализацией механизма репликации таблиц трансляций и данных пользовательских приложений приведена в листинге~\ref{lst:patchset_diff}. Помимо рассмотренного в данной главе кода патчсет содержит изменения, необходимые для сопровождения реплицированных таблиц трансляций и данных в других подсистемах и системных вызовах ядра. Полный патчсет доступен по ссылке~\cite{urepl_patchset}.
@@ -1226,13 +234,6 @@ create mode 100644 mm/numa_user_replication.c
 \subsection{Оценка производительности}
 
 В данной части представлены результаты экспериментальных измерений и их анализ. Эксперименты проводились на двух серверах архитектуры arm64, характеристики которых приведены в таблице~\ref{tab:hardware_specification}. На графиках и в таблицах конфигурация системы обозначается парой политик репликации: сначала указывается политика репликации таблиц трансляций, затем~--- политика репликации данных.
-
-Остальные параметры системы были одинаковыми для всех запусков. Особое внимание следует обратить на следующие настройки:
-\begin{itemize}
-	\item поддержка \textit{Transparent Huge Pages}~\cite{THP} отключена на этапе сборки ядра, поскольку интегрировать её в механизм репликации не удалось;
-	\item подсистемы \textit{swap} и \textit{compaction}~\cite{compaction} отключены для оценки влияния механизма репликации в изоляции от других механизмов управления памятью;
-	\item NUMA-балансировщик включён: во-первых, он необходим для реализации политики \texttt{Lazy} репликации данных, а во-вторых, представляет интерес сравнение предложенного в работе механизма репликации для борьбы с NUMA-эффектом с имеющимся в Linux решением~--- NUMA-балансировщиком.
-\end{itemize}
 
 \begin{table}[H]
     \centering
@@ -1254,6 +255,13 @@ create mode 100644 mm/numa_user_replication.c
     \caption{Спецификация серверов}
     \label{tab:hardware_specification}
 \end{table}
+
+Остальные параметры системы были одинаковыми для всех запусков. Особое внимание следует обратить на следующие настройки:
+\begin{itemize}
+	\item поддержка \textit{Transparent Huge Pages}~\cite{THP} отключена на этапе сборки ядра, поскольку интегрировать её в механизм репликации не удалось;
+	\item подсистемы \textit{swap} и \textit{compaction}~\cite{compaction} отключены для оценки влияния механизма репликации в изоляции от других механизмов управления памятью;
+	\item NUMA-балансировщик включён: во-первых, он необходим для реализации политики \texttt{Lazy} репликации данных, а во-вторых, представляет интерес сравнение предложенного в работе механизма репликации для борьбы с NUMA-эффектом с имеющимся в Linux решением~--- NUMA-балансировщиком.
+\end{itemize}
 
 \subsubsection{Синтетический тест}
 
@@ -1298,7 +306,7 @@ do {
 } while (interval_iter < nr_intervals);
 \end{lstlisting}
 
-Результаты теста представлены на графике~\ref{fig:synthetic_test}. В рассматриваемом запуске синтетический тест инициализировался на NUMA-ноде, которой соответствуют CPU с 72-го по 95-й. Поскольку отображение памяти выполнялось с использованием флага \texttt{MAP\_POPULATE}, физические страницы данных и таблицы трансляций были созданы заранее и размещены на данной NUMA-ноде в соответствии с политикой размещения памяти по умолчанию.
+Результаты теста представлены на графике~\ref{fig:synthetic_test}. В рассматриваемом запуске синтетический тест инициализировался на NUMA-ноде, которой соответствуют CPU с 72-го по 95-ый. Поскольку отображение памяти выполнялось с использованием флага \texttt{MAP\_POPULATE}, физические страницы данных и таблицы трансляций были созданы заранее и размещены на данной NUMA-ноде в соответствии с политикой размещения памяти по умолчанию.
 
 \begin{figure}[ht]
     \centering
@@ -1324,13 +332,11 @@ do {
 
 Бенчмарк \texttt{sysbench} предназначен для нагрузочного тестирования систем управления базами данных. В рамках данного исследования использовалась СУБД MySQL 8.3. После предварительной подготовки тестовой базы данных \texttt{sysbench} создаёт набор рабочих потоков, которые генерируют запросы к серверу базы данных в соответствии с выбранным сценарием нагрузки. В процессе выполнения собирается статистика производительности, основным показателем которой является число транзакций в секунду (TPS, \textit{transactions per second}).
 
-Бенчмарк позволяет задавать как количество рабочих потоков, так и тип генерируемой нагрузки. В данной работе использовались сценарии \texttt{oltp\_read\_only}, \texttt{oltp\_point\_select} и \texttt{oltp\_select\_random\_points}.
+Бенчмарк позволяет задавать как количество рабочих потоков, так и тип генерируемой нагрузки. В данной работе использовались сценарии \texttt{oltp\_read\_only}, \texttt{oltp\_point\_select} и \texttt{oltp\_select\_random\_points}, результаты представлены в таблице~\ref{tab:sysbench}.
 
 Эксперименты проводились на сервере Kunpeng 920-4826 в конфигурациях \texttt{(None, None)} и \texttt{(All, Lazy)}. Следует отметить, что политики репликации применялись не к самому процессу \texttt{sysbench}, а к серверу базы данных, поскольку именно он выполняет обработку запросов и осуществляет доступ к данным. Размер тестовой базы данных составлял 200~GiB, она полностью размещалась в оперативной памяти.
 
-Результаты сценария \texttt{oltp\_read\_only} представлены в таблице~\ref{tab:oltp_read_only}, сценария \texttt{oltp\_point\_select}~--- в таблице~\ref{tab:oltp_point_select}, и \texttt{oltp\_select\_random\_points}~--- в таблице~\ref{tab:oltp_select_random_points}.
-
-\begin{table}[H]
+\begin{table}[ht]
     \centering
     \begin{tabular}{
         |>{\centering\arraybackslash}m{3cm}|
@@ -1338,53 +344,43 @@ do {
 		|>{\centering\arraybackslash}m{3cm}
 		|>{\centering\arraybackslash}m{3cm}|}
         \hline
-        \multirow{2}{*}{Число потоков} & \multicolumn{3}{c|}{Количество транзакций в секунду} \\ \cline{2-4}
+        \multirow{2}{*}{Число потоков} & \multicolumn{3}{c|}{Сценарий \texttt{oltp\_read\_only}} \\ \cline{2-4}
         & (None, None) & (All, Lazy) & $\Delta$ \\ \hline
         48  & 25222 & 24500 & -2.86\% \\ \hline
         96  & 42362 & 42878 & +1.22\% \\ \hline
 		192 & 40617 & 40665 & +0.12\% \\ \hline
 		288 & 38334 & 39064 & +1.90\% \\ \hline
     \end{tabular}
-    \caption{Результаты сценария \texttt{oltp\_read\_only} бенчмарка \texttt{sysbench}}
-    \label{tab:oltp_read_only}
-\end{table}
-
-\begin{table}[H]
-    \centering
+	\\[0.5cm]
     \begin{tabular}{
         |>{\centering\arraybackslash}m{3cm}|
         |>{\centering\arraybackslash}m{3cm}
 		|>{\centering\arraybackslash}m{3cm}
 		|>{\centering\arraybackslash}m{3cm}|}
         \hline
-        \multirow{2}{*}{Число потоков} & \multicolumn{3}{c|}{Количество транзакций в секунду} \\ \cline{2-4}
+        \multirow{2}{*}{Число потоков} & \multicolumn{3}{c|}{Сценарий \texttt{oltp\_point\_select}} \\ \cline{2-4}
         & (None, None) & (All, Lazy) & $\Delta$ \\ \hline
         48  & 550870 & 550170 & -0.13\% \\ \hline
         96  & 801134 & 802434 & +0.16\% \\ \hline
 		192 & 852841 & 860026 & +0.84\% \\ \hline
 		288 & 794767 & 819655 & +3.13\% \\ \hline
     \end{tabular}
-    \caption{Результаты сценария \texttt{oltp\_point\_select} бенчмарка \texttt{sysbench}}
-    \label{tab:oltp_point_select}
-\end{table}
-
-\begin{table}[H]
-    \centering
+	\\[0.5cm]
     \begin{tabular}{
         |>{\centering\arraybackslash}m{3cm}|
         |>{\centering\arraybackslash}m{3cm}
 		|>{\centering\arraybackslash}m{3cm}
 		|>{\centering\arraybackslash}m{3cm}|}
         \hline
-        \multirow{2}{*}{Число потоков} & \multicolumn{3}{c|}{Количество транзакций в секунду} \\ \cline{2-4}
+        \multirow{2}{*}{Число потоков} & \multicolumn{3}{c|}{Сценарий \texttt{oltp\_select\_random\_points}} \\ \cline{2-4}
         & (None, None) & (All, Lazy) & $\Delta$ \\ \hline
         48  & 21297 & 23034 & +8.16\% \\ \hline
         96  & 23201 & 23291 & +0.39\% \\ \hline
 		192 & 21924 & 23597 & +7.63\% \\ \hline
 		288 & 23755 & 23915 & +0.67\% \\ \hline
     \end{tabular}
-    \caption{Результаты сценария \texttt{oltp\_select\_random\_points} бенчмарка \texttt{sysbench}}
-    \label{tab:oltp_select_random_points}
+    \caption{Результаты различных сценариев бенчмарка \texttt{sysbench}. Измеряемая величина~--- количество транзакций в секунду}
+    \label{tab:sysbench}
 \end{table}
 
 Согласно рекомендациям разработчиков \texttt{sysbench}, наиболее показательными являются результаты, полученные при количестве рабочих потоков, превышающем число аппаратных потоков выполнения в системе в 2--3 раза. В рассматриваемой конфигурации это соответствует значениям 192 и 288 потоков. Такой выбор обусловлен тем, что рабочие потоки значительную часть времени проводят в ожидании завершения запросов к базе данных, поэтому увеличение их числа позволяет поддерживать более высокую загрузку вычислительных ресурсов системы.
@@ -1393,7 +389,7 @@ do {
 
 Далее в таблице~\ref{tab:phoronix} представлены результаты прикладных тестов из набора \texttt{Phoronix Test Suite}. Тесты запускались на сервере Kunpeng 920-6426. Для краткости обозначений используется числовая нотация: 0 соответствует политике \texttt{None}, 1~--- \texttt{Minimal} и \texttt{Lazy}, 2~--- \texttt{All}.
 
-\begin{table}[H]
+\begin{table}[ht]
     \centering
 	\footnotesize
     \begin{tabular}{

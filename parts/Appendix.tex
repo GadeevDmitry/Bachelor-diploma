@@ -1,5 +1,1051 @@
 \section*{Приложение}
 \addcontentsline{toc}{section}{Приложение}
 \label{sec:Apendix} \index{Apendix}
+\hypertarget{sec:Appendix_hypertarget}{}
 
-Здесь необходимо написать приложение, которое вы должны придумать самостоятельно.
+%Здесь необходимо написать приложение, которое вы должны придумать самостоятельно.
+
+В приложении представлены листинги программного кода, на которые имеются ссылки в основном тексте работы.
+
+%===============lst:vm_replica_flags===============
+
+\begin{lstlisting}[style=diff]
+ /* include/linux/mm.h */
+
+ #ifdef CONFIG_ARCH_USES_HIGH_VMA_FLAGS
+ #define VM_HIGH_ARCH_BIT_0	32
+ ...
+ #define VM_HIGH_ARCH_BIT_5	37
+<+>+#define VM_HIGH_ARCH_BIT_6	39</+>
+<+>+#define VM_HIGH_ARCH_BIT_7	40</+>
+ #define VM_HIGH_ARCH_0	BIT(VM_HIGH_ARCH_BIT_0)
+ ...
+ #define VM_HIGH_ARCH_5	BIT(VM_HIGH_ARCH_BIT_5)
+<+>+#define VM_HIGH_ARCH_6	BIT(VM_HIGH_ARCH_BIT_6)</+>
+<+>+#define VM_HIGH_ARCH_7	BIT(VM_HIGH_ARCH_BIT_7)</+>
+ #endif /* CONFIG_ARCH_USES_HIGH_VMA_FLAGS */
+ ...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+/* Page tables for this vma should be replicated during page faults */</+>
+<+>+#define VM_REPLICA_INIT	VM_HIGH_ARCH_6</+>
+<+>+/*</+>
+<+>+ * Phys memory of this vma might/should be replicated.</+>
+<+>+ * If this flag is set, VM_REPLICA_INIT also must be set.</+>
+<+>+ */</+>
+<+>+#define VM_REPLICA_COMMIT	VM_HIGH_ARCH_7</+>
+<+>+#endif /* CONFIG_USER_REPLICATION */</+>
+\end{lstlisting}
+\begin{lstlisting}[
+    style=normal,
+    caption={Флаги репликации для виртуальных областей памяти},
+    label={lst:vm_replica_flags}
+]
+/* include/linux/numa_user_replication.h */
+
+#ifdef CONFIG_USER_REPLICATION
+...
+static inline bool numa_is_vma_replicant(struct vm_area_struct *vma) {
+	return vma->vm_flags & VM_REPLICA_INIT;
+}
+
+static inline bool vma_has_replicas(struct vm_area_struct *vma) {
+	return vma->vm_flags & VM_REPLICA_COMMIT;
+}
+...
+#else
+...
+static inline bool numa_is_vma_replicant(struct vm_area_struct *vma) {
+	return 0;
+}
+
+static inline bool vma_has_replicas(struct vm_area_struct *vma) {
+	return 0;
+}
+...
+#endif /* CONFIG_USER_REPLICATION */
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:mm_struct===============
+
+\begin{lstlisting}[style=diff]
+ /* include/linux/mm_types.h */
+
+<+>+enum table_replication_policy_t {</+>
+<+>+	/* no table replication */</+>
+<+>+	TABLE_REPLICATION_NONE = 0,</+>
+<+>+	/* replicate minimal amount to support RO-data replication */</+>
+<+>+	TABLE_REPLICATION_MINIMAL,</+>
+<+>+	/* replicate all tables */</+>
+<+>+	TABLE_REPLICATION_ALL</+>
+<+>+};</+>
+<+>+</+>
+<+>+enum data_replication_policy_t {</+>
+<+>+	/* no data replicas at all */</+>
+<+>+	DATA_REPLICATION_NONE = 0,</+>
+<+>+	/* replicas are created on demand via numa balancer */</+>
+<+>+	DATA_REPLICATION_ON_DEMAND,</+>
+<+>+	/* all ro-data always replicated */</+>
+<+>+	DATA_REPLICATION_ALL</+>
+<+>+};</+>
+<+>+</+>
+<+>+struct numa_replication_policy_t {</+>
+<+>+	enum table_replication_policy_t table_policy:3;</+>
+<+>+	enum data_replication_policy_t data_policy:3;</+>
+<+>+};</+>
+<+>+</+>
+ ...
+ struct mm_struct {
+     ...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+    struct numa_replication_policy_t replication_policy;</+>
+<+>+#endif</+>
+ };
+\end{lstlisting}
+\begin{lstlisting}[
+    style=normal,
+    caption={Политики NUMA-репликации},
+    label={lst:mm_struct}
+]
+/* include/linux/numa_user_replication.h */
+
+#ifdef CONFIG_USER_REPLICATION
+...
+static inline enum table_replication_policy_t
+get_table_replication_policy(struct mm_struct *mm) {
+	return mm->replication_policy.table_policy;
+}
+
+static inline void
+set_table_replication_policy(struct mm_struct *mm,
+	enum table_replication_policy_t table_pol) {
+	mm->replication_policy.table_policy = table_pol;
+}
+
+static inline enum data_replication_policy_t
+get_data_replication_policy(struct mm_struct *mm) {
+	return mm->replication_policy.data_policy;
+}
+
+static inline void
+set_data_replication_policy(struct mm_struct *mm,
+	enum data_replication_policy_t data_pol) {
+	mm->replication_policy.data_policy = data_pol;
+}
+...
+#endif /* CONFIG_USER_REPLICATION */
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:vmflags_modify_replica===============
+
+\begin{lstlisting}[style=normal]
+/* include/linux/numa_user_replication.h */
+
+#ifdef CONFIG_USER_REPLICATION
+...
+/* true if vma with @vm_flags is suitable for data replication */
+static inline bool __vmflags_replica_candidate(vm_flags_t vm_flags) {
+	return (vm_flags & VM_ACCESS_FLAGS) &&
+        !(vm_flags & (VM_WRITE | VM_SHARED));
+}
+
+/* true if vma with @vm_flags is ready for VM_REPLICA_COMMIT flag, i.e.
+ * it is suitable for data replication and VM_REPLICA_INIT is already
+ * set */
+static inline bool vmflags_might_be_replicated(vm_flags_t vm_flags) {
+	return (vm_flags & VM_REPLICA_INIT) && (vm_flags & VM_ACCESS_FLAGS) &&
+        !(vm_flags & (VM_WRITE | VM_SHARED));
+}
+
+/* set replication flags of @vm_flags according to @mm's policies */
+static inline void vmflags_modify_replica(
+    struct mm_struct *mm, unsigned long *vm_flags) {
+	*vm_flags &= ~(VM_REPLICA_INIT | VM_REPLICA_COMMIT);
+
+	if ((get_table_replication_policy(mm) == TABLE_REPLICATION_ALL) ||
+		(get_table_replication_policy(mm) == TABLE_REPLICATION_MINIMAL &&
+			__vmflags_replica_candidate(*vm_flags))) {
+		*vm_flags |= VM_REPLICA_INIT;
+		if (get_data_replication_policy(mm) != DATA_REPLICATION_NONE &&
+				vmflags_might_be_replicated(*vm_flags))
+			*vm_flags |= VM_REPLICA_COMMIT;
+	}
+}
+...
+#endif /* CONFIG_USER_REPLICATION */
+\end{lstlisting}
+\begin{lstlisting}[
+    style=diff,
+    caption={Установка флагов репликации новым/модифицированным областям},
+    label={lst:vmflags_modify_replica}
+]
+ /* mm/mmap.c */
+
+ unsigned long do_mmap(struct file *file, unsigned long addr,
+             unsigned long len, unsigned long prot,
+ 	         unsigned long flags, vm_flags_t vm_flags,
+ 			 unsigned long pgoff, unsigned long *populate,
+ 			 struct list_head *uf)
+ {
+     struct mm_struct *mm = current->mm;
+     ...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+    vmflags_modify_replica(mm, &vm_flags);</+>
+<+>+#endif</+>
+     addr = mmap_region(file, addr, len, vm_flags, pgoff, uf);
+     ...
+     return addr;
+ }
+
+ /* mm/mprotect.c */
+
+ static int do_mprotect_pkey(unsigned long start, size_t len,
+         unsigned long prot, int pkey)
+ {
+     unsigned long end;
+     struct vm_area_struct *vma;
+     struct vma_iterator vmi;
+     ...
+     for_each_vma_range(vmi, vma, end) {
+         unsigned long mask_off_old_flags, newflags;
+         int new_vma_pkey;
+         ...
+         newflags = calc_vm_prot_bits(prot, new_vma_pkey);
+         newflags |= (vma->vm_flags & ~mask_off_old_flags);
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+        if (vma->vm_mm)</+>
+<+>+            vmflags_modify_replica(vma->vm_mm, &newflags);</+>
+<+>+#endif</+>
+         ...
+     }
+     ...
+ }
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:numa_mm_handle_table_replication===============
+
+\begin{lstlisting}[
+    style=normal,
+    caption={Установка флага репликации таблиц трансляций при смене политики},
+    label={lst:numa_mm_handle_table_replication}
+]
+/* mm/numa_user_replication.c */
+
+/* called when table replication policy goes from All to Minimal */
+static void dereplicate_all2min_pgtables(struct mm_struct *mm) {
+	struct vm_area_struct *vma;
+    ...
+	do {
+		unsigned long addr = vma->vm_start;
+		struct vm_area_struct *next;
+        ...
+        /* clear VM_REPLICA_INIT and dereplicate
+         * pgtables for not replica candidate vmas */
+		if (numa_is_vma_replicant(vma) && !vma_might_be_replicated(vma)) {
+			vm_flags_clear(vma, VM_REPLICA_INIT);
+			...
+			dereplicate_pgtables_pgd_range(&tlb, addr, vma->vm_end, ...);
+		}
+		vma = next;
+	} while (vma);
+    ...
+}
+
+static void numa_mm_table_replication_minimal(struct mm_struct *mm) {
+	switch (get_table_replication_policy(mm)) {
+    /* executed when table replication policy goes from None to Minimal */
+	case TABLE_REPLICATION_NONE: {
+		struct vm_area_struct *vma;
+		MA_STATE(mas, &mm->mm_mt, 0, 0);
+
+		mas_for_each(&mas, vma, ULONG_MAX) {
+            /* set VM_REPLICA_INIT and replicate
+             * pgtables for replica candidate vmas */
+			if (vma_replica_candidate(vma)) {
+				vm_flags_set(vma, VM_REPLICA_INIT);
+				replicate_pgtables_vma(vma);
+			}
+		}
+		break;
+	}
+	case TABLE_REPLICATION_MINIMAL:
+		return;
+	case TABLE_REPLICATION_ALL:
+		dereplicate_all2min_pgtables(mm);
+		break;
+	}
+
+	set_table_replication_policy(mm, TABLE_REPLICATION_MINIMAL);
+}
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:numa_mm_handle_data_replication===============
+
+\begin{lstlisting}[
+    style=normal,
+    caption={Установка флага репликации данных при смене политики},
+    label={lst:numa_mm_handle_data_replication}
+]
+/* mm/numa_user_replication.c */
+
+static bool numa_mm_data_replication_none(struct mm_struct *mm) {
+	switch (get_data_replication_policy(mm)) {
+	case DATA_REPLICATION_NONE:
+		return true;
+    /* executed when data replication policy
+     * goes from Lazy/All to None */
+	case DATA_REPLICATION_ON_DEMAND:
+	case DATA_REPLICATION_ALL: {
+		struct vm_area_struct *vma;
+		MA_STATE(mas, &mm->mm_mt, 0, 0);
+
+		mas_for_each(&mas, vma, ULONG_MAX) {
+            /* deduplicate data and clear VM_REPLICA_COMMIT
+             * for all has_replicas vmas */
+			if (vma_has_replicas(vma)) {
+				vma_start_write(vma);
+				if (phys_deduplicate(vma,
+						vma->vm_start, vma->vm_end - vma->vm_start))
+					return false;
+				__vm_flags_mod(vma, VM_NONE, VM_REPLICA_COMMIT);
+			}
+		}
+		break;
+	}
+	}
+
+	set_data_replication_policy(mm, DATA_REPLICATION_NONE);
+	return true;
+}
+
+static bool numa_mm_data_replication_all(struct mm_struct *mm) {
+	switch (get_data_replication_policy(mm)) {
+    /* executed when data replication policy
+     * goes from Lazy/None to All */
+	case DATA_REPLICATION_NONE:
+	case DATA_REPLICATION_ON_DEMAND: {
+		struct vm_area_struct *vma;
+		MA_STATE(mas, &mm->mm_mt, 0, 0);
+
+		mas_for_each(&mas, vma, ULONG_MAX) {
+            /* set VM_REPLICA_COMMIT and duplicate data
+             * for all replica candidate vmas */
+			if (vma_might_be_replicated(vma))
+				vm_flags_set(vma, VM_REPLICA_COMMIT);
+			if (vma_has_replicas(vma))
+				phys_duplicate(vma,
+                    vma->vm_start, vma->vm_end - vma->vm_start);
+		}
+		break;
+	}
+	case DATA_REPLICATION_ALL:
+		return true;
+	}
+
+	set_data_replication_policy(mm, DATA_REPLICATION_ALL);
+	return true;
+}
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:PG_replicated===============
+
+\begin{lstlisting}[
+	style=diff,
+	caption={Флаг для реплицированных физических страниц},
+	label={lst:PG_replicated}
+]
+ /* include/linux/page-flags.h */
+
+ enum pageflags {
+	 PG_locked,
+	 ...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 PG_replicated,</+>
+<+>+#endif</+>
+ 	 __NR_PAGEFLAGS,
+	 ...
+ };
+ ...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+PAGEFLAG(Replicated, replicated, PF_ANY)</+>
+<+>+#else</+>
+<+>+PAGEFLAG_FALSE(Replicated, replicated)</+>
+<+>+#endif</+>
+ ...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+#define __PG_REPLICATED		(1UL << PG_replicated)</+>
+<+>+#else</+>
+<+>+#define __PG_REPLICATED		0</+>
+<+>+#endif</+>
+<+>+</+>
+ /*
+  * Flags checked when a page is freed.  Pages being freed should not have
+  * these flags set.  If they are, there is a problem.
+  */
+ #define PAGE_FLAGS_CHECK_AT_FREE					\
+ 	 1UL << PG_private    | 1UL << PG_private_2 |	\
+ 	 1UL << PG_writeback  | 1UL << PG_reserved  |	\
+ 	 1UL << PG_slab       | 1UL << PG_active    |	\
+<->-	 1UL << PG_unevictable| __PG_MLOCKED | LRU_GEN_MASK)</->
+<+>+	 1UL << PG_unevictable| __PG_REPLICATED | __PG_MLOCKED | LRU_GEN_MASK)</+>
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:master_table===============
+
+\begin{lstlisting}[
+	style=diff,
+	caption={Использование блокировки \textit{мастер}-таблицы},
+	label={lst:master_table}
+]
+ /* include/linux/mm_types.h */
+
+ struct ptdesc {
+	 ...
+	 union {
+		 struct mm_struct *pt_mm; /* Used for x86 pgds. */
+		 atomic_t pt_frag_refcount; /* Powerpc only. */
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+		 struct ptdesc *master_table;</+>
+<+>+#endif</+>
+	 };
+
+	 union {
+ #if ALLOC_SPLIT_PTLOCKS
+		 spinlock_t *ptl;
+ #else
+		 spinlock_t ptl;
+ #endif
+	 };
+	 ...
+ };
+
+ /* include/linux/mm.h */
+
+ #if USE_SPLIT_PTE_PTLOCKS
+ #if ALLOC_SPLIT_PTLOCKS
+ ...
+ bool ptlock_alloc(struct ptdesc *ptdesc);
+ void ptlock_free(struct ptdesc *ptdesc);
+
+ static inline spinlock_t *ptlock_ptr(struct ptdesc *ptdesc) {
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 return ptdesc->master_table->ptl;</+>
+<+>+#else</+>
+	 return ptdesc->ptl;
+<+>+#endif</+>
+ }
+ #else /* ALLOC_SPLIT_PTLOCKS */
+ ...
+ static inline bool ptlock_alloc(struct ptdesc *ptdesc) {
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 ptdesc->master_table = ptdesc;</+>
+<+>+#endif</+>
+	 return true;
+ }
+
+ static inline void ptlock_free(struct ptdesc *ptdesc) {
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 ptdesc->master_table = NULL;</+>
+<+>+#endif</+>
+ }
+
+ static inline spinlock_t *ptlock_ptr(struct ptdesc *ptdesc) {
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 return &ptdesc->master_table->ptl;</+>
+<+>+#else</+>
+	 return &ptdesc->ptl;
+<+>+#endif</+>
+ }
+ #endif /* ALLOC_SPLIT_PTLOCKS */
+ ...
+ #endif /* USE_SPLIT_PTE_PTLOCKS */
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:replica_list===============
+
+\begin{lstlisting}[style=diff]
+ /* include/linux/llist.h */
+
+ struct llist_head {
+	 struct llist_node *first;
+ };
+ 
+ struct llist_node {
+	 struct llist_node *next;
+ };
+
+ /* include/linux/mm_types.h */
+
+ struct ptdesc {
+	 ...
+<->-	 unsigned long __page_mapping; /* Unused for page tables. */</->
+<+>+	 union {</+>
+<+>+		 unsigned long __page_mapping; /* Unused for page tables. */</+>
+<+>+		 struct llist_head replica_list_head;</+>
+<+>+		 struct llist_node replica_list_node;</+>
+<+>+	 };</+>
+	 ...
+ };
+\end{lstlisting}
+\begin{lstlisting}[
+	style=normal,
+	caption={Циклический односвязный список таблиц-реплик},
+	label={lst:replica_list}
+]
+/* include/linux/numa_user_replication.h */
+
+#ifdef CONFIG_USER_REPLICATION
+...
+/**
+ * @pos:	struct ptdesc* of current replica
+ * @table:	current table entry to write (virtual address)
+ * @head_table:	table entry to start with, will be a part of this loop
+ * @nid:	node id of current pgtable
+ * @offset:	offset of current table entry in table page in bytes
+ * @start:	boolean value for tmp storage
+ */
+#define for_each_pgtable(pos, table, head_table, nid, offset, start)	\
+	for (pos = llist_entry(									\
+			&virt_to_ptdesc(head_table)->replica_list_node,	\
+		typeof(*pos), replica_list_node),					\
+	    start = true, nid = page_to_nid(ptdesc_page(pos)),	\
+	    offset = offset_in_table(head_table),				\
+		table = (typeof(table))get_table_ptr(pos, offset);	\
+	    pos != virt_to_ptdesc(head_table) || start;			\
+	    pos = llist_entry((pos)->replica_list_node.next,	\
+			typeof(*pos), replica_list_node),				\
+	    table = (typeof(table))get_table_ptr(pos, offset),	\
+	    nid = page_to_nid(ptdesc_page(pos)), start = false)
+
+/**
+ * @pos:	struct ptdesc* of current replica
+ * @table:	current table entry to write (virtual address)
+ * @head_table:	table entry to start with, will not be a part of this loop
+ * @offset:	offset of current table entry in table page in bytes
+ */
+#define for_each_pgtable_replica(pos, table, head_table, offset)	\
+	for (pos = llist_entry(										\
+			virt_to_ptdesc(head_table)->replica_list_node.next,	\
+		typeof(*pos), replica_list_node),					\
+	    offset = offset_in_table(head_table),				\
+		table = (typeof(table))get_table_ptr(pos, offset);	\
+	    pos != virt_to_ptdesc(head_table);					\
+	    pos = llist_entry((pos)->replica_list_node.next,	\
+			typeof(*pos), replica_list_node),				\
+	    table = (typeof(table))get_table_ptr(pos, offset))
+...
+#endif /* CONFIG_USER_REPLICATION */
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:pgd_numa===============
+
+\begin{lstlisting}[style=diff]
+ /* include/linux/mm_types.h */
+
+ struct mm_struct {
+	 struct {
+		 ...
+		 pgd_t *pgd;
+		 ...
+	 };
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 pgd_t **pgd_numa;</+>
+<+>+#endif</+>
+	 ...
+ };
+\end{lstlisting}
+\begin{lstlisting}[
+	style=normal,
+	caption={Указатели на реплицированные PGD-таблицы доступны через \texttt{mm\_struct}},
+	label={lst:pgd_numa}
+]
+/* include/linux/numa_user_replication.h */
+
+#ifdef CONFIG_USER_REPLICATION
+...
+#define this_node_pgd(mm) ((mm)->pgd_numa[numa_node_id()])
+...
+#else
+...
+#define this_node_pgd(mm) ((mm)->pgd)
+...
+#endif /* CONFIG_USER_REPLICATION */
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:handle_mm_fault===============
+
+\begin{lstlisting}[
+	style=diff,
+	caption={Спуск в иерархии таблиц трансляций в процессе обработки ошибки страниц},
+	label={lst:handle_mm_fault}
+]
+ /* mm/memory.c */
+
+ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
+	 unsigned long address, unsigned int flags)
+ {
+	 struct vm_fault vmf = {...};
+	 struct mm_struct *mm = vma->vm_mm;
+	 pgd_t *pgd;
+	 p4d_t *p4d;
+	 ...
+<->-	 pgd = pgd_offset(mm, address);</->
+<->-	 p4d = p4d_alloc(mm, pgd, address);</->
+<+>+	 pgd = fault_pgd_offset(&vmf, address);</+>
+<+>+	 p4d = fault_p4d_alloc(&vmf, mm, pgd, address);</+>
+	 ...
+<->-	 vmf.pud = pud_alloc(mm, p4d, address);</->
+<+>+	 vmf.pud = fault_pud_alloc(&vmf, mm, p4d, address);</+>
+	 ...
+<->-	 vmf.pmd = pmd_alloc(mm, vmf.pud, address);</->
+<+>+	 vmf.pmd = fault_pmd_alloc(&vmf, mm, vmf.pud, address);</+>
+	 ...
+<+>+	 if (fault_pte_alloc(&vmf))</+>
+<+>+		 return VM_FAULT_OOM;</+>
+	 return handle_pte_fault(&vmf);
+ }
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:fault_pxx_alloc===============
+
+\begin{lstlisting}[
+	style=normal,
+	caption={Модифицированные функции для спуска, аллокации и репликации таблиц трансляций},
+	label={lst:fault_pxx_alloc}
+]
+/* include/linux/numa_user_replication.h */
+
+#ifdef CONFIG_USER_REPLICATION
+...
+pgd_t *fault_pgd_offset(struct vm_fault *vmf, unsigned long address) {
+	vmf->pgd = pgd_offset_pgd(this_node_pgd(vmf->vma->vm_mm), address);
+	return vmf->pgd;
+}
+
+p4d_t *fault_p4d_alloc(struct vm_fault *vmf, struct mm_struct *mm,
+	pgd_t *pgd, unsigned long address) {
+	if (replication_path_pgd(vmf)) {
+		if (replication_handle_p4d_fault(vmf))
+			return NULL;
+	} else
+		vmf->p4d = p4d_alloc(mm, pgd, address);
+	return vmf->p4d;
+}
+
+pud_t *fault_pud_alloc(struct vm_fault *vmf, struct mm_struct *mm,
+	p4d_t *p4d, unsigned long address) {
+	if (replication_path_p4d(vmf)) {
+		if (replication_handle_pud_fault(vmf))
+			return NULL;
+	} else
+		vmf->pud = pud_alloc(mm, p4d, address);
+	return vmf->pud;
+}
+
+pmd_t *fault_pmd_alloc(struct vm_fault *vmf, struct mm_struct *mm,
+	pud_t *pud, unsigned long address) {
+	if (replication_path_pud(vmf)) {
+		if (replication_handle_pmd_fault(vmf))
+			return NULL;
+	} else
+		vmf->pmd = pmd_alloc(mm, pud, address);
+	return vmf->pmd;
+}
+
+int fault_pte_alloc(struct vm_fault *vmf) {
+	if (replication_path_pmd(vmf))
+		return replication_handle_pte_fault(vmf);
+	return 0;
+}
+...
+#else
+...
+static inline pgd_t *fault_pgd_offset(struct vm_fault *vmf,
+	unsigned long address) {
+	return pgd_offset(vmf->vma->vm_mm, address);
+}
+
+static inline p4d_t *fault_p4d_alloc(struct vm_fault *vmf,
+	struct mm_struct *mm, pgd_t *pgd, unsigned long address) {
+	return p4d_alloc(mm, pgd, address);
+}
+
+static inline pud_t *fault_pud_alloc(struct vm_fault *vmf,
+	struct mm_struct *mm, p4d_t *p4d, unsigned long address) {
+	return pud_alloc(mm, p4d, address);
+}
+
+static inline pmd_t *fault_pmd_alloc(struct vm_fault *vmf,
+	struct mm_struct *mm, pud_t *pud, unsigned long address) {
+	return pmd_alloc(mm, pud, address);
+}
+
+static inline int fault_pte_alloc(struct vm_fault *vmf) {
+	return 0;
+}
+...
+#endif /* CONFIG_USER_REPLICATION */
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:replication_handle_pte_fault===============
+
+\begin{lstlisting}[
+	style=normal,
+	caption={Репликация PTE-таблиц},
+	label={lst:replication_handle_pte_fault}
+]
+/* mm/numa_user_replication.c */
+
+static vm_fault_t replication_handle_pte_fault(struct vm_fault *vmf)
+{
+	int ret;
+	struct mm_struct *mm = vmf->vma->vm_mm;
+	struct ptdesc *pte_tables[MAX_NUMNODES];
+	spinlock_t *ptl;
+
+	/* true if PTE-level is absent or replicated */
+	if (replicated_pte_level(vmf)) {
+		if (!pmd_none(*vmf->pmd))
+			/* PTE-level is not absent, therefore it is replicated.
+			 * Nothing need to do, returning. */
+			return 0;
+
+		/* PTE-level is absent, we need to create and replicate it */
+
+		/* Allocate and prepare replicated PTE-tables.
+		 * Preparation involves:
+		 * 1. setting PG_replicated flag;
+		 * 2. setting master-table for tables-replicas;
+		 * 3. connecting tables into cyclic linked list.
+		 */
+		ret = prepare_replicated_pte_tables(NUMA_NO_NODE, pte_tables, mm);
+		if (ret)
+			return VM_FAULT_OOM;
+		/* acquire PMD-lock before modifying parent PMD-tables */
+		ptl = pmd_lock(mm, vmf->pmd);
+		if (unlikely(pmd_present(*vmf->pmd))) {
+			/* Someone else has already replicated this level.
+			 * Nothing else need to do, releasing and returning. */
+			spin_unlock(ptl);
+			release_replicated_pte_tables(NUMA_NO_NODE, pte_tables, mm);
+		} else {
+			/* Populate PMD-entries to point to replicated PTE-tables. */
+			sync_replicated_pte_tables(NUMA_NO_NODE, pte_tables,
+				vmf->pmd, mm);
+			spin_unlock(ptl);
+		}
+	} else {
+		/* the only PTE-table exists, we need to replicate it */
+
+		struct page *table_page = pmd_pgtable(*(vmf->pmd));
+		int pte_node = page_to_nid(table_page);
+
+		pte_tables[pte_node] = page_ptdesc(table_page);
+		/* Allocate remaining PTE-tables. */
+		ret = prepare_replicated_pte_tables(pte_node, pte_tables, mm);
+		if (ret)
+			return VM_FAULT_OOM;
+		/* acquire PMD-lock before modifying parent PMD-tables */
+		ptl = pmd_lock(mm, vmf->pmd);
+		if (unlikely(PageReplicated(table_page))) {
+			/* Someone else has already replicated this level.
+			 * Nothing else need to do, releasing and returning. */
+			spin_unlock(ptl);
+			release_replicated_pte_tables(pte_node, pte_tables, mm);
+		} else {
+			/* Acquire PTE-lock of existing PTE-table.
+			 * Prepare replicated PTE-tables, it involves:
+			 * 1. setting PG_replicated flag;
+			 * 2. setting master-table to point on existing PTE-table;
+			 * 3. connecting tables into cyclic linked list;
+			 * 4. copy the contents of existing PTE-table to others.
+			 * Populate PMD-entries to point to replicated PTE-tables.
+			 */
+			sync_replicated_pte_tables(pte_node, pte_tables,
+				vmf->pmd, mm);
+			spin_unlock(ptl);
+		}
+	}
+
+	return 0;
+}
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:data_replication_all===============
+
+\begin{lstlisting}[
+	style=diff,
+	caption={Репликация данных при установленной политике \texttt{All}},
+	label={lst:data_replication_all}
+]
+ /* mm/memory.c */
+
+ static vm_fault_t do_pte_missing(struct vm_fault *vmf)
+ {
+<+>+	 vm_fault_t ret;</+>
+	 ...
+	 if (vma_is_anonymous(vmf->vma))
+<->-		 return do_anonymous_page(vmf);</->
+<+>+		 ret = do_anonymous_page(vmf);</+>
+	 else
+<->-		 return do_fault(vmf);</->
+<+>+		 ret = do_fault(vmf);</+>
+<+>+</+>
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 if (get_data_replication_policy(vmf->vma->vm_mm) ==</+>
+<+>+		 DATA_REPLICATION_ALL) {</+>
+<+>+		 if (vma_has_replicas(vmf->vma))</+>
+<+>+			 numa_replicate_page(vmf);</+>
+<+>+	 }</+>
+<+>+#endif</+>
+<+>+	 return ret;</+>
+ }
+
+ /* mm/mprotect.c */
+
+ int mprotect_fixup(struct vma_iterator *vmi, struct mmu_gather *tlb,
+	 struct vm_area_struct *vma, struct vm_area_struct **pprev,
+	 unsigned long start, unsigned long end, unsigned long newflags)
+ {
+	 struct mm_struct *mm = vma->vm_mm;
+	 unsigned int mm_cp_flags = 0;
+	 ...
+	 vm_flags_reset(vma, newflags);
+	 if (vma_wants_manual_pte_write_upgrade(vma))
+		 mm_cp_flags |= MM_CP_TRY_CHANGE_WRITABLE;
+	 vma_set_page_prot(vma);
+
+	 change_protection(tlb, vma, start, end, mm_cp_flags);
+
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 if (get_data_replication_policy(mm) == DATA_REPLICATION_ALL) {</+>
+<+>+		 if (vma_has_replicas(vma)) {</+>
+<+>+			 replicate_pgtables_vma(vma);</+>
+<+>+			 phys_duplicate(vma, start, end - start);</+>
+<+>+		 }</+>
+<+>+	 }</+>
+<+>+#endif</+>
+	 ...
+ }
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:NUMA_balancer===============
+
+\begin{lstlisting}[
+	style=diff,
+	caption={Модифицированная фаза сканирования NUMA-балансировщика},
+	label={lst:NUMA_balancer}
+]
+ /* kernel/sched/fair.c */
+
+ static void task_numa_work(struct callback_head *work)
+ {
+	 struct vm_area_struct *vma;
+	 struct vma_iterator vmi;
+	 ...
+	 for (; vma; vma = vma_next(&vmi)) {
+<->-		 if (!vma_migratable(vma) || !vma_policy_mof(vma) ||</->
+<+>+		 if (!vma_migratable(vma) || (!vma_policy_mof(vma) &&</+>
+<+>+			 !vma_has_replicas(vma)) ||</+>
+			 is_vm_hugetlb_page(vma) || (vma->vm_flags & VM_MIXEDMAP))
+			 continue;
+
+		 /* Avoid hinting faults in read-only file-backed mappings
+		  * as migrating the pages will be of marginal benefit. */
+<+>+</+>
+<+>+		 /* Do not avoid hinting faults in read-only file-backed mappings</+>
+<+>+		  * as replicating the pages should be of significant benefit. */</+>
+<->-		 if (!vma->vm_mm || (vma->vm_file &&</->
+<->-			 (vma->vm_flags & (VM_READ|VM_WRITE)) == (VM_READ)))</->
+<+>+		 if ((!vma->vm_mm || (vma->vm_file &&</+>
+<+>+			 (vma->vm_flags & (VM_READ|VM_WRITE)) == (VM_READ))) &&</+>
+<+>+			 !vma_has_replicas(vma))</+>
+			 continue;
+		 ...
+	 }
+	 ...
+ }
+
+ /* mm/mprotect.c */
+
+ static long change_pte_range(struct mmu_gather *tlb,
+	 struct vm_area_struct *vma, pmd_t *pmd, unsigned long addr,
+	 unsigned long end, pgprot_t newprot, unsigned long cp_flags)
+ {
+	 pte_t *pte, oldpte;
+	 bool prot_numa = cp_flags & MM_CP_PROT_NUMA;
+	 long pages = 0;
+	 ...
+	 do {
+		 oldpte = ptep_get(pte);
+		 if (pte_present(oldpte)) {
+			 ...
+			 if (prot_numa) {
+				 struct page *page;
+				 ...
+<+>+				 /* skip already replicated memory */</+>
+<+>+				 if (PageReplicated(page))</+>
+<+>+				 	 return pages;</+>
+				 ...
+			 }
+			 ...
+		 }
+	 } while (pte++, addr += PAGE_SIZE, addr != end);
+	 ...
+	 return pages;
+ }
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:do_numa_page===============
+
+\begin{lstlisting}[
+	style=diff,
+	caption={Модифицированный обработчик \textit{NUMA hinting faults}},
+	label={lst:do_numa_page}
+]
+ static vm_fault_t do_numa_page(struct vm_fault *vmf)
+ {
+	 struct vm_area_struct *vma = vmf->vma;
+	 struct page *page = NULL;
+	 int page_nid = NUMA_NO_NODE, target_nid;
+	 ...
+	 target_nid = numa_migrate_prep(
+		 page, vma, vmf->address, page_nid, &flags);
+<->-	 if (target_nid == NUMA_NO_NODE) {</->
+<+>+	 if (target_nid == NUMA_NO_NODE && !vma_has_replicas(vma)) {</+>
+		 put_page(page);
+		 goto out_map;
+	 }
+	 ...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 if (vma_has_replicas(vma)) {</+>
+<+>+		 /* drop the reference count that was</+>
+<+>+		  * elevated in numa_migrate_prep() */</+>
+<+>+		 put_page(folio);</+>
+<+>+</+>
+<+>+		 if (numa_replicate_page(vmf)) {</+>
+<+>+			 /* replication success */</+>
+<+>+			 ...</+>
+<+>+			 return 0;</+>
+<+>+		 }</+>
+<+>+		 /* replication failed */</+>
+<+>+</+>
+<+>+		 /* forbid migration if the condition from</+>
+<+>+		  * kernel/sched/fair.c:task_numa_work()</+>
+<+>+		  * is not satisfied */</+>
+<+>+		 if (vma->vm_file &&</+>
+<+>+			 ((vma->vm_flags & (VM_READ|VM_WRITE)) == VM_READ)) {</+>
+<+>+			 ...</+>
+<+>+			 goto out_map;</+>
+<+>+		 }</+>
+<+>+</+>
+<+>+		 /* forbid migration if the condition from</+>
+<+>+		  * beginning of the function is not satisfied */</+>
+<+>+		 if (target_nid == NUMA_NO_NODE) {</+>
+<+>+			 ...</+>
+<+>+			 goto out_map;</+>
+<+>+		 }</+>
+<+>+	 }</+>
+<+>+	 /* fallback to migration */</+>
+<+>+#endif</+>
+	 ...
+ }
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:dereplicate_pgtables_pte_range===============
+
+\begin{lstlisting}[
+	style=normal,
+	caption={Дерепликация PTE-таблиц},
+	label={lst:dereplicate_pgtables_pte_range}
+]
+/* mm/numa_user_replication.c */
+
+static void dereplicate_pgtables_pte_range(struct mmu_gather *tlb,
+	pmd_t *pmd, unsigned long addr) {
+	unsigned long offset;
+	struct ptdesc *curr, *tmp;
+	pmd_t *curr_pmd;
+	pte_t *curr_pte;
+	spinlock_t *lock;
+	/* master-table is the only one that will remain */
+	pgtable_t ptetable = ptdesc_page(
+		page_ptdesc(pmd_page(*pmd))->master_table);
+
+	/* nothing need to do if PTE table is not replicated */
+	if (!numa_pgtable_replicated(page_to_virt(ptetable)))
+		return;
+
+	/* Populate PMD-entries to point to the master-table.*/
+
+	lock = pmd_lock(tlb->mm, pmd); /* probably unnecessary */
+	pmd_populate(tlb->mm, pmd, ptetable);
+	for_each_pgtable_replica(curr, curr_pmd, pmd, offset)
+		pmd_populate(tlb->mm, curr_pmd, ptetable);
+	spin_unlock(lock);
+
+	/* Release unneeded tables. */
+	for_each_pgtable_replica(curr, tmp, curr_pte,
+		page_to_virt(ptetable), offset) {
+		/* destroy the cyclic linked list */
+		cleanup_pte_list(ptdesc_page(curr));
+		/* release the table (PG_replicated flag unsetting here) */
+		pte_free_tlb(tlb, ptdesc_page(curr), addr);
+		mm_dec_nr_ptes(tlb->mm);
+	}
+
+	/* destroy the cyclic linked list and
+	 * unset PG_replicated flag for master-table */
+	cleanup_pte_list(ptetable);
+	ClearPageReplicated(ptetable);
+}
+\end{lstlisting}
+\vspace{0.5cm}
+
+%===============lst:data_derepl===============
+
+\begin{lstlisting}[
+	style=diff,
+	caption={Дерепликация данных},
+	label={lst:data_derepl}
+]
+ /* mm/mprotect.c */
+
+ int
+ mprotect_fixup(struct vma_iterator *vmi, struct mmu_gather *tlb,
+	 struct vm_area_struct *vma, struct vm_area_struct **pprev,
+	 unsigned long start, unsigned long end, unsigned long newflags)
+ {
+	...
+<+>+#ifdef CONFIG_USER_REPLICATION</+>
+<+>+	 if (!(newflags & VM_REPLICA_COMMIT) && vma_has_replicas(vma)) {</+>
+<+>+		 /* We should take vma write lock before phys_deduplicate()</+>
+<+>+		  * to prevent concurents to phys_duplicate() the vma's</+>
+<+>+		  * range again using vma read lock.</+>
+<+>+		  */</+>
+<+>+		 vma_start_write(vma);</+>
+<+>+		 error = phys_deduplicate(vma, start, end - start);</+>
+<+>+		 if (error)</+>
+<+>+			 goto fail;</+>
+<+>+	 }</+>
+<+>+#endif</+>
+	 ...
+	 vma_start_write(vma);
+	 vm_flags_reset(vma, newflags);
+	 ...
+ }
+\end{lstlisting}
